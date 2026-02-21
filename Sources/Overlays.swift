@@ -38,7 +38,7 @@ class PeakingProcessor {
     }
     
     func process(pixelBuffer: CVPixelBuffer) -> UIImage? {
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(.right)
         
         // 1. Edge Detection to find sharp details
         let edges = CIFilter.edges()
