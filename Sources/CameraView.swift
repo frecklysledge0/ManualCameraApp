@@ -149,7 +149,7 @@ struct CameraView: View {
                 
                 // --- TOP MIDDLE: Histogram ---
                 if showingHistogram {
-                    HistogramView(pixelBuffer: nil)
+                    HistogramView(data: cameraManager.histogramData)
                         .frame(width: 80, height: 40)
                         .padding(.top, 8)
                 }

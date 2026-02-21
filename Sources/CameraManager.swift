@@ -19,7 +19,16 @@ class CameraManager: NSObject, ObservableObject {
     @Published var currentEV: Float = 0.0 // Added EV
     
     @Published var peakingImage: UIImage?
-    @Published var isPeakingEnabled: Bool = false
+    @Published var histogramData: [Float] = []
+    
+    // Extracted pipeline
+    private let imagePipeline = ImagePipelineProcessor()
+    
+    @Published var isPeakingEnabled: Bool = false {
+        didSet {
+            imagePipeline.isPeakingEnabled = isPeakingEnabled
+        }
+    }
     @Published var isFrontCamera: Bool = false
     
     // Lens Selection
@@ -130,7 +139,15 @@ class CameraManager: NSObject, ObservableObject {
                 // Add Video Data Output for Histogram & Focus Peaking
                 if self.session.canAddOutput(self.videoDataOutput) {
                     self.session.addOutput(self.videoDataOutput)
-                    self.videoDataOutput.setSampleBufferDelegate(self, queue: self.videoDataQueue)
+                    
+                    self.imagePipeline.onPeakingUpdate = { [weak self] image in
+                        DispatchQueue.main.async { self?.peakingImage = image }
+                    }
+                    self.imagePipeline.onHistogramUpdate = { [weak self] data in
+                        DispatchQueue.main.async { self?.histogramData = data }
+                    }
+                    self.videoDataOutput.setSampleBufferDelegate(self.imagePipeline, queue: self.videoDataQueue)
+                    
                     self.videoDataOutput.alwaysDiscardsLateVideoFrames = true
                     self.videoDataOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
                 }
@@ -181,6 +198,7 @@ class CameraManager: NSObject, ObservableObject {
         let snappedSS = self.currentShutterSpeed
         let snappedWB = self.currentWB
         let snappedEV = self.currentEV
+        let snappedFocus = self.currentFocus
         
         sessionQueue.async {
             self.session.beginConfiguration()
@@ -242,6 +260,7 @@ class CameraManager: NSObject, ObservableObject {
             self.updateExposure(iso: snappedISO, shutterSpeed: snappedSS)
             self.updateWhiteBalance(temperature: snappedWB)
             self.updateEV(bias: snappedEV)
+            self.updateFocus(lensPosition: snappedFocus)
         }
     }
     
@@ -250,6 +269,7 @@ class CameraManager: NSObject, ObservableObject {
         let snappedSS = self.currentShutterSpeed
         let snappedWB = self.currentWB
         let snappedEV = self.currentEV
+        let snappedFocus = self.currentFocus
         
         sessionQueue.async {
             self.session.beginConfiguration()
@@ -305,6 +325,7 @@ class CameraManager: NSObject, ObservableObject {
             self.updateExposure(iso: snappedISO, shutterSpeed: snappedSS)
             self.updateWhiteBalance(temperature: snappedWB)
             self.updateEV(bias: snappedEV)
+            self.updateFocus(lensPosition: snappedFocus)
         }
     }
     
@@ -526,15 +547,4 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
     }
 }
 
-extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
-    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        
-        if isPeakingEnabled { // only process if enabled
-            let newPeakingImage = PeakingProcessor.shared.process(pixelBuffer: pixelBuffer)
-            DispatchQueue.main.async {
-                self.peakingImage = newPeakingImage
-            }
-        }
-    }
-}
+
