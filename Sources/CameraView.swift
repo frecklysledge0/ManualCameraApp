@@ -14,6 +14,7 @@ struct CameraView: View {
     @State private var focusPoint: CGPoint? = nil
     @State private var showFocusBox: Bool = false
     @State private var showGrid: Bool = false
+    @State private var flashOpacity: Double = 0.0
     
     // Aesthetic Constants
     let hudColor = Color.black.opacity(0.6)
@@ -266,7 +267,23 @@ struct CameraView: View {
                         
                         // Center: Primary Shutter
                         Button(action: {
+                            // 1. Shutter Flash
+                            withAnimation(.linear(duration: 0.1)) {
+                                flashOpacity = 1.0
+                            }
+                            
+                            // 2. Shutter Haptic
+                            let impact = UIImpactFeedbackGenerator(style: .medium)
+                            impact.impactOccurred()
+                            
                             cameraManager.capturePhoto()
+                            
+                            // 3. Fade out Flash
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                withAnimation(.easeOut(duration: 0.2)) {
+                                    flashOpacity = 0.0
+                                }
+                            }
                         }) {
                             ZStack {
                                 Circle()
@@ -296,6 +313,12 @@ struct CameraView: View {
                         .ignoresSafeArea()
                 )
             }
+            
+            // White Flash Overlay
+            Color.white
+                .ignoresSafeArea()
+                .opacity(flashOpacity)
+                .allowsHitTesting(false)
         }
         .onAppear {
             if !cameraManager.isSessionRunning {

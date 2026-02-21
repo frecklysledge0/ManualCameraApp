@@ -538,10 +538,16 @@ extension CameraManager: AVCapturePhotoCaptureDelegate {
             let creationRequest = PHAssetCreationRequest.forAsset()
             creationRequest.addResource(with: .photo, data: photoData, options: nil)
         }) { success, error in
-            if success {
-                print("Saved photo to library")
-            } else if let error = error {
-                print("Error saving photo: \(error)")
+            DispatchQueue.main.async {
+                if success {
+                    print("Saved photo to library")
+                    let feedback = UINotificationFeedbackGenerator()
+                    feedback.notificationOccurred(.success)
+                } else if let error = error {
+                    print("Error saving photo: \(error)")
+                    let feedback = UINotificationFeedbackGenerator()
+                    feedback.notificationOccurred(.error)
+                }
             }
         }
     }
