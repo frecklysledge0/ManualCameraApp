@@ -1,8 +1,16 @@
 import SwiftUI
 import CoreImage
 
+struct RGBHistogramData {
+    var red: [Float] = []
+    var green: [Float] = []
+    var blue: [Float] = []
+    
+    var isEmpty: Bool { red.isEmpty || green.isEmpty || blue.isEmpty }
+}
+
 struct HistogramView: View {
-    let data: [Float]
+    let data: RGBHistogramData
     
     var body: some View {
         GeometryReader { geometry in
@@ -12,23 +20,21 @@ struct HistogramView: View {
                     .border(Color.white, width: 1)
                 
                 if !data.isEmpty {
-                    Path { path in
-                        let w = geometry.size.width
-                        let h = geometry.size.height
-                        
-                        let stepX = w / CGFloat(data.count)
-                        
-                        path.move(to: CGPoint(x: 0, y: h))
-                        for i in 0..<data.count {
-                            let x = CGFloat(i) * stepX
-                            // Prevent overflowing the box, capping at 0.95 of height
-                            let y = h - (CGFloat(data[i]) * h * 0.95)
-                            path.addLine(to: CGPoint(x: x, y: y))
-                        }
-                        path.addLine(to: CGPoint(x: w, y: h))
-                        path.closeSubpath()
-                    }
-                    .fill(Color.white.opacity(0.8))
+                    // Red Channel
+                    histogramPath(for: data.red, in: geometry.size)
+                        .fill(Color.red.opacity(0.6))
+                        .blendMode(.screen)
+                    
+                    // Green Channel
+                    histogramPath(for: data.green, in: geometry.size)
+                        .fill(Color.green.opacity(0.6))
+                        .blendMode(.screen)
+                    
+                    // Blue Channel
+                    histogramPath(for: data.blue, in: geometry.size)
+                        .fill(Color.blue.opacity(0.6))
+                        .blendMode(.screen)
+                    
                 } else {
                     Text("Histogram")
                         .font(.caption2)
@@ -36,6 +42,22 @@ struct HistogramView: View {
                         .position(x: geometry.size.width/2, y: geometry.size.height/2)
                 }
             }
+        }
+    }
+    private func histogramPath(for channelData: [Float], in size: CGSize) -> Path {
+        Path { path in
+            let w = size.width
+            let h = size.height
+            let stepX = w / CGFloat(channelData.count)
+            
+            path.move(to: CGPoint(x: 0, y: h))
+            for i in 0..<channelData.count {
+                let x = CGFloat(i) * stepX
+                let y = h - (CGFloat(channelData[i]) * h * 0.95)
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+            path.addLine(to: CGPoint(x: w, y: h))
+            path.closeSubpath()
         }
     }
 }
@@ -49,7 +71,7 @@ class ImagePipelineProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     
     // Callbacks to main thread / CameraManager
     var onPeakingUpdate: ((UIImage?) -> Void)?
-    var onHistogramUpdate: (([Float]) -> Void)?
+    var onHistogramUpdate: ((RGBHistogramData) -> Void)?
     
     var isPeakingEnabled = false
     var isHistogramEnabled = true
@@ -107,16 +129,10 @@ class ImagePipelineProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         return UIImage(cgImage: cgImage)
     }
 
-    private func generateHistogram(from ciImage: CIImage) -> [Float]? {
-        // Convert to grayscale first so R=G=B=Luma, making histogram generation purely luminance based
-        let mono = CIFilter.colorControls()
-        mono.inputImage = ciImage
-        mono.saturation = 0.0
-        guard let monoImage = mono.outputImage else { return nil }
-        
+    private func generateHistogram(from ciImage: CIImage) -> RGBHistogramData? {
         let areaHistogram = CIFilter.areaHistogram()
-        areaHistogram.inputImage = monoImage
-        areaHistogram.extent = monoImage.extent
+        areaHistogram.inputImage = ciImage
+        areaHistogram.extent = ciImage.extent
         areaHistogram.count = 256
         areaHistogram.scale = 1.0
 
@@ -125,22 +141,35 @@ class ImagePipelineProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         var bitmap = [Float](repeating: 0, count: 256 * 4) // RGBAf
         context.render(histOutput, toBitmap: &bitmap, rowBytes: 256 * 4 * MemoryLayout<Float>.size, bounds: CGRect(x: 0, y: 0, width: 256, height: 1), format: .RGBAf, colorSpace: nil)
         
-        var result = [Float](repeating: 0, count: 256)
-        var maxVal: Float = 0.0001
+        var rResult = [Float](repeating: 0, count: 256)
+        var gResult = [Float](repeating: 0, count: 256)
+        var bResult = [Float](repeating: 0, count: 256)
         
-        // We rendered RGBA floats. Since we desaturated, picking the R channel is sufficient for luma frequency.
+        var rMax: Float = 0.0001
+        var gMax: Float = 0.0001
+        var bMax: Float = 0.0001
+        
         for i in 0..<256 {
-            let frequency = bitmap[i * 4] // Extract Red channel
-            result[i] = frequency
-            if frequency > maxVal { maxVal = frequency }
+            let rFreq = bitmap[i * 4]
+            let gFreq = bitmap[i * 4 + 1]
+            let bFreq = bitmap[i * 4 + 2]
+            
+            rResult[i] = rFreq
+            gResult[i] = gFreq
+            bResult[i] = bFreq
+            
+            if rFreq > rMax { rMax = rFreq }
+            if gFreq > gMax { gMax = gFreq }
+            if bFreq > bMax { bMax = bFreq }
         }
         
-        // Normalize the graph values between 0.0 and 1.0 based on the maximum bin peak
         for i in 0..<256 {
-            result[i] = result[i] / maxVal
+            rResult[i] = rResult[i] / rMax
+            gResult[i] = gResult[i] / gMax
+            bResult[i] = bResult[i] / bMax
         }
         
-        return result
+        return RGBHistogramData(red: rResult, green: gResult, blue: bResult)
     }
 }
 

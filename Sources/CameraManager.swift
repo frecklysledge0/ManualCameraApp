@@ -19,7 +19,7 @@ class CameraManager: NSObject, ObservableObject {
     @Published var currentEV: Float = 0.0 // Added EV
     
     @Published var peakingImage: UIImage?
-    @Published var histogramData: [Float] = []
+    @Published var histogramData = RGBHistogramData()
     
     // Extracted pipeline
     private let imagePipeline = ImagePipelineProcessor()
