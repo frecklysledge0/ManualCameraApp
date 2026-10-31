@@ -1,4 +1,6 @@
 // swift-tools-version:5.9
+// For editor indexing only. Build and test the app with ManualCameraApp.xcodeproj
+// (regenerate it with `python3 tools/generate_xcodeproj.py`).
 import PackageDescription
 
 let package = Package(
@@ -12,7 +14,8 @@ let package = Package(
     targets: [
         .target(
             name: "ManualCameraApp",
-            path: "Sources"
+            path: "Sources",
+            exclude: ["Pipeline/Shaders.metal"]
         )
     ]
 )
