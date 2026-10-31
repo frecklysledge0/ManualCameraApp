@@ -372,7 +372,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
                 self.deviceController.submit(.exposure(.custom(iso: self.loopISO, duration: loop.duration)))
             } else {
                 self.autoISOLoop = nil
-                self.deviceController.submit(plan.command)
+                self.deviceController.submit(.exposure(plan.command))
             }
         }
     }
