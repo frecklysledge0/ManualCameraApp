@@ -35,10 +35,11 @@ final class PhotoCaptureProcessorTests: XCTestCase {
         XCTAssertEqual(rawURL.pathExtension, "dng")
 
         XCTAssertEqual(outcomes.count, 1)
-        guard case .saved(.photoLibrary, let thumbnailSource) = outcomes.first else {
+        guard case .saved(.photoLibrary, let thumbnailSource, let bytes) = outcomes.first else {
             return XCTFail("Expected a saved outcome")
         }
         XCTAssertEqual(thumbnailSource, Data([9, 9]))
+        XCTAssertEqual(bytes, 5, "2 processed bytes + 3 RAW bytes")
         XCTAssertEqual(store.removed, [processor.id], "Temp folder removed after a successful save")
         XCTAssertFalse(FileManager.default.fileExists(atPath: rawURL.path), "Temp DNG removed")
         XCTAssertTrue(processor.isFinished)

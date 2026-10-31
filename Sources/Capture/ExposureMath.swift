@@ -157,6 +157,34 @@ enum ExposureMath {
         return String(format: "%+.1f", bias)
     }
 
+    /// Aperture readout: `ƒ/1.48`, `ƒ/1.8`, `ƒ/4`.
+    static func formatAperture(_ fNumber: Float) -> String {
+        guard fNumber.isFinite, fNumber > 0 else { return "ƒ/—" }
+        let tenths = (fNumber * 10).rounded()
+        if abs(fNumber * 10 - tenths) < 0.05 {
+            if abs(fNumber - fNumber.rounded()) < 0.05 {
+                return "ƒ/\(Int(fNumber.rounded()))"
+            }
+            return String(format: "ƒ/%.1f", fNumber)
+        }
+        return String(format: "ƒ/%.2f", fNumber)
+    }
+
+    /// Full stops get labelled major ticks on the dials (Slice 2 §5).
+    static let fullStopShutterSpeeds: [Double] = [
+        1.0 / 32000, 1.0 / 16000, 1.0 / 8000, 1.0 / 4000, 1.0 / 2000, 1.0 / 1000, 1.0 / 500, 1.0 / 250,
+        1.0 / 125, 1.0 / 60, 1.0 / 30, 1.0 / 15, 1.0 / 8, 1.0 / 4, 0.5, 1, 2, 4, 8, 15, 30
+    ]
+    static let fullStopISOs: [Float] = [25, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 25600]
+
+    static func isFullStop(shutter seconds: Double) -> Bool {
+        fullStopShutterSpeeds.contains { abs($0 - seconds) / $0 < 0.01 }
+    }
+
+    static func isFullStop(iso: Float) -> Bool {
+        fullStopISOs.contains { abs($0 - iso) / $0 < 0.01 }
+    }
+
     static func formatKelvin(_ kelvin: Float) -> String {
         guard kelvin.isFinite, kelvin > 0 else { return "—" }
         return "\(Int((kelvin / 100).rounded()) * 100)K"

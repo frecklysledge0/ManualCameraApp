@@ -26,6 +26,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         case previewAngle(CGFloat)
         case feedRate(Double)
         case pendingSaves(Int)
+        case focusAdjusting(Bool)
     }
 
     /// Called on the main thread.
@@ -66,6 +67,10 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
     private var liveTimer: DispatchSourceTimer?
     private var lastLive: LiveDeviceValues?
     private var notificationTokens: [NSObjectProtocol] = []
+    private var focusObservation: NSKeyValueObservation?
+    // Auto-ISO loop (Slice 2 §6)
+    private var autoISOLoop: AutoISOLoop?
+    private var loopISO: Float = 0
 
     // Written on the main thread, read on the session queue.
     private let previewLock = NSLock()
@@ -321,6 +326,9 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
     private func bindActiveDevice(_ device: AVCaptureDevice, lens: LensOption, reapply: Bool) {
         let wrapper = AVCameraDevice(device: device)
         activeCameraDevice = wrapper
+        focusObservation = device.observe(\.isAdjustingFocus, options: [.new]) { [weak self] observed, _ in
+            self?.post(.focusAdjusting(observed.isAdjustingFocus))
+        }
         deviceController.bind(wrapper, reapply: reapply)
         rotation.bind(device: device, previewLayer: previewLayer)
         preparePhotoSettings()
@@ -340,8 +348,32 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
     func enterManualExposure() {
         sessionQueue.async { [weak self] in
             guard let self, let device = self.activeCameraDevice else { return }
+            self.autoISOLoop = nil
             self.deviceController.submit(.exposure(.custom(iso: device.currentISO, duration: device.currentDuration)))
             self.deviceController.flushNow()
+        }
+    }
+
+    /// Applies an exposure plan (Slice 2 §6): the command, plus the auto-ISO loop when S or
+    /// Auto ISO has to be emulated.
+    func apply(_ plan: ExposurePlan) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if let loop = plan.loop {
+                if self.autoISOLoop == nil {
+                    // Seed the loop with the ISO the camera is using right now.
+                    if case .custom(let iso, _) = plan.command {
+                        self.loopISO = iso
+                    } else {
+                        self.loopISO = self.activeCameraDevice?.currentISO ?? 100
+                    }
+                }
+                self.autoISOLoop = loop
+                self.deviceController.submit(.exposure(.custom(iso: self.loopISO, duration: loop.duration)))
+            } else {
+                self.autoISOLoop = nil
+                self.deviceController.submit(plan.command)
+            }
         }
     }
 
@@ -349,6 +381,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
     func resetToAuto() {
         sessionQueue.async { [weak self] in
             guard let self else { return }
+            self.autoISOLoop = nil
             self.deviceController.resetRemembered()
             self.deviceController.submit(.exposure(.auto(bias: 0)))
             self.deviceController.submit(.whiteBalance(.auto))
@@ -495,8 +528,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
 
     private func preparePhotoSettings() {
         guard session.outputs.contains(photoOutput) else { return }
-        let custom: Bool
-        if case .some(.custom) = deviceController.exposureState { custom = true } else { custom = false }
+        let custom = deviceController.exposureState?.isLocked ?? false
         var templates = [makePhotoSettings(raw: false, customExposure: custom).settings]
         if rawPixelFormat() != nil {
             templates.insert(makePhotoSettings(raw: true, customExposure: custom).settings, at: 0)
@@ -526,8 +558,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         // Apply any slider movement still waiting in the coalescer before the exposure starts.
         deviceController.flushNow()
 
-        let custom: Bool
-        if case .some(.custom) = deviceController.exposureState { custom = true } else { custom = false }
+        let custom = deviceController.exposureState?.isLocked ?? false
         let (settings, isRaw) = makePhotoSettings(raw: raw, customExposure: custom)
 
         if let connection = photoOutput.connection(with: .video) {
@@ -554,7 +585,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         processor.onFinish = { [weak self] finished, outcome in
             guard let self else { return }
             var thumbnail: UIImage?
-            if case .saved(_, let source) = outcome, let source {
+            if case .saved(_, let source, _) = outcome, let source {
                 thumbnail = ThumbnailMaker.thumbnail(from: source)
             }
             self.post(.captureFinished(outcome, thumbnail: thumbnail))
@@ -634,9 +665,32 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
             meterOffset: device.exposureTargetOffset,
             isAdjustingFocus: device.isAdjustingFocus
         )
+        runAutoISOLoop(device: wrapper)
         guard values.differsNoticeably(from: lastLive) else { return }
         lastLive = values
         post(.live(values))
+    }
+
+    /// One tick of the emulated auto-ISO loop (15 Hz). Uses the ISO the device actually metered
+    /// with, so a frame of meter latency causes no overshoot (`ExposureLoopMath`).
+    private func runAutoISOLoop(device: AVCameraDevice) {
+        guard let loop = autoISOLoop else { return }
+        let limits = device.limits
+        if loopISO <= 0 { loopISO = device.currentISO }
+        guard let next = ExposureLoopMath.nextISO(
+            commanded: loopISO,
+            observed: device.currentISO,
+            meterOffset: device.exposureTargetOffset,
+            bias: loop.bias,
+            minISO: limits.minISO,
+            maxISO: limits.maxISO
+        ) else { return }
+        loopISO = next
+        if let aperture = loop.aperture, limits.exposure.supportsManualAperture {
+            deviceController.submit(.exposure(.priority(aperture: aperture, duration: loop.duration, iso: next, bias: 0)))
+        } else {
+            deviceController.submit(.exposure(.custom(iso: next, duration: loop.duration)))
+        }
     }
 
     // MARK: - Interruptions and errors (§11)

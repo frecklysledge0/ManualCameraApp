@@ -13,8 +13,9 @@ protocol PhotoLibrarySaving: AnyObject {
 }
 
 enum CaptureOutcome {
-    /// Saved. `thumbnailSource` is the processed image, used for the gallery button.
-    case saved(SaveDestination, thumbnailSource: Data?)
+    /// Saved. `thumbnailSource` is the processed image, used for the gallery button; `bytes` is the
+    /// shot's total size (for the shots-left estimate).
+    case saved(SaveDestination, thumbnailSource: Data?, bytes: Int)
     /// Captured but saving failed. The files are kept on disk for "Retry save".
     case savePending(Error)
     /// Nothing usable was captured.
@@ -128,6 +129,7 @@ final class PhotoCaptureProcessor {
             }
         }
         item = toSave
+        let bytes = Self.size(of: toSave)
 
         saver.save(toSave) { [weak self] result in
             guard let self else { return }
@@ -136,7 +138,7 @@ final class PhotoCaptureProcessor {
                 if destination == .photoLibrary {
                     self.store.remove(self.id)
                 }
-                self.finish(.saved(destination, thumbnailSource: toSave.processedData))
+                self.finish(.saved(destination, thumbnailSource: toSave.processedData, bytes: bytes))
             case .failure(let saveError):
                 do {
                     try self.store.persistPending(toSave)
@@ -149,6 +151,17 @@ final class PhotoCaptureProcessor {
     }
 
     // MARK: - Private
+
+    /// Processed bytes plus the DNG's size on disk (read before Photos moves the file).
+    static func size(of item: CaptureItem) -> Int {
+        var total = item.processedData?.count ?? 0
+        if let url = item.rawFileURL,
+           let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attributes[.size] as? NSNumber {
+            total += size.intValue
+        }
+        return total
+    }
 
     private func recordError(_ error: Error) {
         lock.lock()

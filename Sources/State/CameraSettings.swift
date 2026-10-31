@@ -1,65 +1,49 @@
 import Foundation
 import Observation
 
-/// The control panel shown under the viewfinder (Slice 1 layout).
-enum ControlPanel: String, CaseIterable, Sendable {
-    case auto
-    case manual
-    case ev
-    case whiteBalance
-    case focus
-}
-
-enum ExposureMode: String, Codable, Sendable {
-    case auto
-    case manual
-}
-
-/// What the user has chosen. Views read and write this optimistically on the main thread; the
-/// engine writes back the values it actually applied (clamped to the device). It is the single
-/// source of truth for the lens and the camera position (F15).
+/// What the user has chosen (Slice 2). Views read and write this optimistically on the main
+/// thread; the engine writes back the values it actually applied. It is the single source of
+/// truth for the lens and the camera position (F15).
 @Observable
 @MainActor
 final class CameraSettings {
 
-    var panel: ControlPanel = .auto
+    // MARK: HUD state
+    var activeTile: FnTile?
+    var showFnSheet = false
+    var histogramExpanded = false
+    var loupeZoom: Int = 4
 
-    // Exposure
-    var exposureMode: ExposureMode = .auto
-    var iso: Float = 100
-    var shutter: Double = 1.0 / 60.0
-    var bias: Float = 0
+    // MARK: Exposure
+    var program: ExposureProgram = .program
+    /// Values of the current program (each program remembers its own in `profile.modeValues`).
+    var exposure = ExposureValues()
 
-    // White balance
-    var whiteBalanceAuto = true
-    var temperature: Float = 5500
+    // MARK: White balance
+    var whiteBalance: WhiteBalanceStop = .auto
     var tint: Float = 0
 
-    // Focus
-    var focusManual = false
+    // MARK: Focus
+    var focusMode: FocusMode = .continuous
     var lensPosition: Float = 0.5
 
-    // Lens
+    // MARK: Lens
     var lens: LensOption?
     var lenses: [LensOption] = []
     var lastBackLens: LensOption?
     var limits: DeviceLimits = .default
 
-    // Capture format
+    // MARK: Capture format
     var rawSupported = false
-    var rawEnabled: Bool
+    var rawEnabled = true
     var rawSuppressedForStorage = false
 
-    // Overlays
-    var peakingEnabled = false
-    var showGrid = false
-    var showHistogram = true
+    // MARK: Overlays and feedback
+    var overlays = OverlaySettings()
+    var haptics = HapticSettings()
+    var theme: ThemeID = .alpha
 
-    static let rawEnabledKey = "rawEnabled"
-
-    init(defaults: UserDefaults = .standard) {
-        rawEnabled = defaults.object(forKey: Self.rawEnabledKey) as? Bool ?? true
-    }
+    // MARK: Derived
 
     var isFrontCamera: Bool { lens?.isFront ?? false }
 
@@ -67,6 +51,13 @@ final class CameraSettings {
     var effectiveRaw: Bool { rawEnabled && rawSupported && !rawSuppressedForStorage }
 
     var backLenses: [LensOption] { lenses.filter { !$0.isFront } }
+
+    var capability: ExposureCapability { limits.exposure }
+
+    var availablePrograms: [ExposureProgram] { capability.availablePrograms }
+
+    /// Peaking is on automatically in MF and opt-in in AF (§8).
+    var peakingActive: Bool { focusMode == .manual || overlays.peakingInAF }
 
     var shutterStops: [Double] {
         ExposureMath.shutterStops(minDuration: limits.minDuration, maxDuration: limits.maxDuration)
@@ -78,5 +69,49 @@ final class CameraSettings {
 
     var evStops: [Float] {
         ExposureMath.evStops(minBias: limits.minBias, maxBias: limits.maxBias, limit: 3)
+    }
+
+    var apertureStops: [Float] { capability.apertureStops }
+
+    /// Whether EV is the metered-manual read-out (M with fixed ISO) rather than a bias dial.
+    var evIsMeteredManual: Bool { program == .manual && !exposure.isoAuto }
+
+    func isAutomatic(_ tile: FnTile) -> Bool {
+        switch tile {
+        case .mode: return program == .program
+        case .aperture: return capability.hasVariableAperture && (program == .program || program == .shutterPriority)
+        case .shutter: return program == .program || program == .aperturePriority
+        case .iso: return program != .manual || exposure.isoAuto
+        case .ev: return false
+        case .whiteBalance: return whiteBalance == .auto
+        case .focus: return focusMode != .manual
+        }
+    }
+
+    /// Restores everything from a saved profile.
+    func apply(_ profile: ShootingProfile) {
+        program = profile.program
+        exposure = profile.values(for: profile.program)
+        whiteBalance = profile.whiteBalance
+        tint = profile.tint
+        focusMode = profile.focusMode
+        overlays = profile.overlays
+        rawEnabled = profile.rawEnabled
+        haptics = profile.haptics
+        theme = profile.theme
+    }
+
+    /// Writes the current state into `profile` (keeps other modes' values).
+    func store(into profile: inout ShootingProfile) {
+        profile.program = program
+        profile.setValues(exposure, for: program)
+        profile.whiteBalance = whiteBalance
+        profile.tint = tint
+        profile.focusMode = focusMode
+        profile.overlays = overlays
+        profile.rawEnabled = rawEnabled
+        profile.haptics = haptics
+        profile.theme = theme
+        if let lens, !lens.isFront { profile.lensKind = lens.kind }
     }
 }

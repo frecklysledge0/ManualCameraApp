@@ -21,6 +21,14 @@ final class LiveTelemetry {
     var liveLensPosition: Float = 0
     var liveTemperature: Float = 0
     var liveAperture: Float = 0
+    var isAdjustingFocus = false
+
+    /// Level state with hysteresis (Slice 2 §9).
+    var rollIsLevel = false
+    var pitchIsLevel = false
+
+    /// Free space ÷ average shot size for the current format.
+    var shotsLeft: Int?
 
     /// Physical orientation and the matching glyph rotation (degrees, continuous).
     var orientation: PhysicalOrientation = .portrait

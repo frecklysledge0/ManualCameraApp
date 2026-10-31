@@ -135,21 +135,29 @@ final class DeviceController {
             switch pendingExposure {
             case .some(.auto):
                 pendingExposure = .auto(bias: bias)
+            case .some(.priority(let aperture, let duration, let iso, _)):
+                pendingExposure = .priority(aperture: aperture, duration: duration, iso: iso, bias: bias)
             case .some(.custom):
                 // F7: EV has no meaning while exposure is manual.
                 break
             case .some(.bias), .none:
                 pendingExposure = .bias(bias)
             }
-        case .auto, .custom:
+        case .auto, .custom, .priority:
             pendingExposure = command
         }
         if let pendingExposure {
             switch pendingExposure {
             case .bias(let bias):
-                if case .some(.custom) = lastExposure { break }
-                lastExposure = .auto(bias: bias)
-            case .auto, .custom:
+                switch lastExposure {
+                case .some(.custom):
+                    break
+                case .some(.priority(let aperture, let duration, let iso, _)):
+                    lastExposure = .priority(aperture: aperture, duration: duration, iso: iso, bias: bias)
+                default:
+                    lastExposure = .auto(bias: bias)
+                }
+            case .auto, .custom, .priority:
                 lastExposure = pendingExposure
             }
         }
@@ -198,9 +206,8 @@ final class DeviceController {
             applied.exposure = apply(exposure, to: device, limits: limits)
         }
         if let point = pendingExposurePoint, limits.supportsExposurePointOfInterest {
-            if case .some(.custom) = exposureState {
-                // Tap-to-focus in manual exposure changes focus only (F7).
-            } else {
+            // Tap-to-focus in manual exposure changes focus only (F7).
+            if !(exposureState?.isFullyManual ?? false) {
                 device.applyExposurePoint(clampPoint(point))
             }
         }
@@ -233,10 +240,30 @@ final class DeviceController {
             exposureState = .auto(bias: clamped)
             return exposureState
         case .bias(let bias):
-            if case .some(.custom) = exposureState { return nil }
             let clamped = limits.clampBias(bias)
-            device.applyExposureBias(clamped)
-            exposureState = .auto(bias: clamped)
+            switch exposureState {
+            case .some(.custom):
+                return nil
+            case .some(.priority(let aperture, let duration, let iso, _)):
+                guard duration == nil || iso == nil else { return nil }
+                device.applyExposureBias(clamped)
+                exposureState = .priority(aperture: aperture, duration: duration, iso: iso, bias: clamped)
+            default:
+                device.applyExposureBias(clamped)
+                exposureState = .auto(bias: clamped)
+            }
+            return exposureState
+        case .priority(let aperture, let duration, let iso, let bias):
+            guard limits.supportsPriorityExposure else { return nil }
+            let safeAperture = aperture.map { limits.clampAperture($0) }
+            let safeDuration = duration.map { limits.clampDuration($0) }
+            let safeISO = iso.map { limits.clampISO($0) }
+            let safeBias = limits.clampBias(bias)
+            device.applyPriorityExposure(aperture: safeAperture, duration: safeDuration, iso: safeISO)
+            if safeDuration == nil || safeISO == nil {
+                device.applyExposureBias(safeBias)
+            }
+            exposureState = .priority(aperture: safeAperture, duration: safeDuration, iso: safeISO, bias: safeBias)
             return exposureState
         case .custom(let iso, let duration):
             guard limits.supportsCustomExposure else { return nil }

@@ -36,6 +36,32 @@ final class CameraController {
     private var focusTapCounter = 0
     private var hasStarted = false
     private var expectingLensSwitchHaptic = false
+
+    // Persistence
+    private var profile: ShootingProfile
+    private var saveWorkItem: DispatchWorkItem?
+
+    // Focus
+    private var awaitingFocusLock = false
+    private var sawFocusAdjusting = false
+    private var focusLockWorkItem: DispatchWorkItem?
+    private var peakDetector = SharpnessPeakDetector()
+    private var isPullingFocus = false
+    private var loupeCloseWorkItem: DispatchWorkItem?
+    /// Last focus point in display uv (loupe centre and sharpness ROI).
+    private var focusPointUV = CGPoint(x: 0.5, y: 0.5)
+    private var nativeBufferSize = CGSize.zero
+    /// Starting in MF: lock at the lens's first reported position instead of an arbitrary one.
+    private var pendingManualFocusLock = false
+
+    // Level
+    private var levelIndicator = LevelIndicator()
+
+    // Shots left
+    private var freeBytes: Int64?
+    private static let rawSizeKey = "averageShotBytes.raw"
+    private static let heifSizeKey = "averageShotBytes.heif"
+
     #if DEBUG
     private let frameProbe = FrameRateProbe()
     #endif
@@ -48,15 +74,20 @@ final class CameraController {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        settings = CameraSettings(defaults: defaults)
+        settings = CameraSettings()
         telemetry = LiveTelemetry()
         status = CaptureStatus()
         haptics = HapticsEngine()
         engine = CaptureEngine()
+        profile = ShootingProfile.load(from: defaults)
 
+        settings.apply(profile)
         settings.lenses = engine.catalog.allLenses
-        settings.lens = engine.catalog.defaultLens
-        settings.lastBackLens = engine.catalog.defaultLens
+        let restoredLens = engine.catalog.lens(kind: profile.lensKind) ?? engine.catalog.defaultLens
+        settings.lens = restoredLens
+        settings.lastBackLens = (restoredLens?.isFront ?? true) ? engine.catalog.defaultLens : restoredLens
+        haptics.isEnabled = settings.haptics.enabled
+        haptics.intensityScale = settings.haptics.intensity
 
         engine.onEvent = { [weak self] event in
             guard let self else { return }
@@ -68,14 +99,20 @@ final class CameraController {
             guard let self else { return }
             runOnMain { self.telemetry.histogram = sample }
         }
+        engine.pipeline.onSharpness = { [weak self] value in
+            guard let self else { return }
+            runOnMain { self.handleSharpness(value) }
+        }
+        engine.pipeline.onBufferSize = { [weak self] size in
+            guard let self else { return }
+            runOnMain { self.nativeBufferSize = size }
+        }
         motion.onReading = { [weak self] reading in
             guard let self else { return }
-            runOnMain {
-                self.telemetry.rollDegrees = reading.rollDegrees
-                self.telemetry.pitchDegrees = reading.pitchDegrees
-            }
+            runOnMain { self.handleMotion(reading) }
         }
         observeSystem()
+        applyOverlayConfig()
         #if DEBUG
         frameProbe.onRate = { [weak self] rate in
             guard let self else { return }
@@ -99,12 +136,11 @@ final class CameraController {
     func sceneBecameActive() {
         haptics.resume()
         guard status.authorization == .authorized else {
-            // Permission may have been granted in Settings while we were away.
             if hasStarted { refreshAuthorization() }
             return
         }
         engine.resume()
-        if settings.showGrid { motion.start() }
+        updateMotionSampling()
         checkStorage()
         checkPhotosAccess(request: false)
     }
@@ -112,6 +148,7 @@ final class CameraController {
     func sceneEnteredBackground() {
         engine.suspend()
         motion.stop()
+        saveProfileNow()
     }
 
     private func requestCameraAccess() {
@@ -153,6 +190,7 @@ final class CameraController {
             return
         }
         engine.start(lens: settings.lens, rawEnabled: settings.effectiveRaw)
+        updateMotionSampling()
         checkPhotosAccess(request: true)
         checkStorage()
         updateThermal()
@@ -173,7 +211,7 @@ final class CameraController {
         } else {
             status.show(Banner(
                 kind: .photosDenied,
-                message: "Photos access is off. Shots are saved to Files › ManualCameraApp.",
+                message: "Photos access is off. Shots are saved to Files › \(Branding.appName).",
                 action: .openSettings
             ))
         }
@@ -185,114 +223,360 @@ final class CameraController {
         previewView = view
         engine.attach(previewLayer: view.videoPreviewLayer)
         engine.pipeline.attachOverlay(view.overlayView.metalLayer)
+        engine.pipeline.attachLoupe(view.loupeView.metalLayer)
         view.onTap = { [weak self] point, devicePoint in
             guard let self else { return }
             MainActor.assumeIsolated {
                 self.focus(atViewPoint: point, devicePoint: devicePoint)
             }
         }
+        view.onLoupeTap = { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated { self.toggleLoupeZoom() }
+        }
         view.onGeometryChange = { [weak self] geometry in
             guard let self else { return }
             MainActor.assumeIsolated {
                 self.status.viewfinder = geometry
+                self.updateLoupeWindow()
             }
         }
     }
 
-    // MARK: - Panels
+    // MARK: - Fn bar and tray
 
-    func select(_ panel: ControlPanel) {
-        guard panel != settings.panel || panel == .auto else { return }
-        settings.panel = panel
-        switch panel {
-        case .auto:
-            settings.exposureMode = .auto
-            settings.bias = 0
-            settings.whiteBalanceAuto = true
-            settings.focusManual = false
-            engine.resetToAuto()
-        case .manual:
-            if settings.exposureMode != .manual {
-                settings.exposureMode = .manual
-                // Start from what the camera is doing now so the image does not jump (F8).
-                if telemetry.liveISO > 0 { settings.iso = telemetry.liveISO }
-                if telemetry.liveShutter > 0 { settings.shutter = telemetry.liveShutter }
-                engine.enterManualExposure()
+    func tapTile(_ tile: FnTile) {
+        settings.showFnSheet = false
+        settings.activeTile = settings.activeTile == tile ? nil : tile
+    }
+
+    func dismissTray() {
+        settings.activeTile = nil
+    }
+
+    func toggleFnSheet() {
+        settings.activeTile = nil
+        settings.showFnSheet.toggle()
+    }
+
+    /// Long-press on a tile returns that parameter to AUTO (Slice 2 §4).
+    func resetTileToAuto(_ tile: FnTile) {
+        switch tile {
+        case .mode:
+            setProgram(.program)
+        case .aperture:
+            switch settings.program {
+            case .aperturePriority: setProgram(.program)
+            case .manual where settings.availablePrograms.contains(.shutterPriority): setProgram(.shutterPriority)
+            default: haptics.play(.limit); return
             }
+        case .shutter:
+            switch settings.program {
+            case .shutterPriority: setProgram(.program)
+            case .manual:
+                setProgram(settings.availablePrograms.contains(.aperturePriority) ? .aperturePriority : .program)
+            default: haptics.play(.limit); return
+            }
+        case .iso:
+            guard settings.program == .manual, !settings.exposure.isoAuto else {
+                haptics.play(.limit)
+                return
+            }
+            settings.exposure.isoAuto = true
+            applyExposure()
         case .ev:
-            break
+            setBias(0)
         case .whiteBalance:
-            if settings.whiteBalanceAuto, telemetry.liveTemperature > 0 {
-                settings.temperature = telemetry.liveTemperature
-            }
+            setWhiteBalance(.auto)
         case .focus:
-            if !settings.focusManual, telemetry.liveLensPosition > 0 {
-                settings.lensPosition = telemetry.liveLensPosition
-            }
+            setFocusMode(.continuous)
         }
-        setPeaking(panel == .focus)
+        haptics.play(.modeChange)
     }
 
-    private func setPeaking(_ enabled: Bool) {
-        settings.peakingEnabled = enabled
-        engine.pipeline.updateConfig { $0.peakingEnabled = enabled }
+    // MARK: - Exposure (Slice 2 §6)
+
+    private var liveExposure: LiveExposure {
+        LiveExposure(iso: telemetry.liveISO, shutter: telemetry.liveShutter, aperture: telemetry.liveAperture)
     }
 
-    // MARK: - Exposure, white balance, focus
+    func setProgram(_ program: ExposureProgram) {
+        guard program != settings.program else { return }
+        guard settings.availablePrograms.contains(program) else {
+            haptics.play(.limit)
+            return
+        }
+        profile.setValues(settings.exposure, for: settings.program)
+        let stored = profile.values(for: program)
+        let values = ExposureRules.transition(from: settings.program, to: program, values: stored, live: liveExposure)
+        settings.program = program
+        settings.exposure = values
+        applyExposure()
+        haptics.play(.modeChange)
+        scheduleSave()
+    }
 
+    /// Sends the current mode's plan to the engine (coalesced on the session queue).
+    private func applyExposure() {
+        let plan = ExposureRules.plan(
+            for: settings.program,
+            values: settings.exposure,
+            live: liveExposure,
+            capability: settings.capability
+        )
+        engine.apply(plan)
+        scheduleSave()
+    }
+
+    /// Moving the shutter dial in P or A takes manual control of the shutter (P→S, A→M).
     func setShutter(_ seconds: Double) {
-        guard settings.exposureMode == .manual else { return }
-        settings.shutter = settings.limits.clampDuration(seconds)
-        engine.send(.exposure(.custom(iso: settings.iso, duration: settings.shutter)))
+        switch settings.program {
+        case .program: setProgram(.shutterPriority)
+        case .aperturePriority: setProgram(.manual)
+        case .shutterPriority, .manual: break
+        }
+        settings.exposure.shutter = settings.limits.clampDuration(seconds)
+        applyExposure()
     }
 
+    /// Moving the ISO dial outside M switches to M at the current values.
     func setISO(_ iso: Float) {
-        guard settings.exposureMode == .manual else { return }
-        settings.iso = settings.limits.clampISO(iso)
-        engine.send(.exposure(.custom(iso: settings.iso, duration: settings.shutter)))
+        if settings.program != .manual { setProgram(.manual) }
+        settings.exposure.isoAuto = false
+        settings.exposure.iso = settings.limits.clampISO(iso)
+        applyExposure()
     }
 
-    /// EV is active only in AUTO exposure (F7).
+    /// Moving the aperture dial in P or S takes manual control of the iris (P→A, S→M).
+    func setAperture(_ aperture: Float) {
+        guard settings.capability.hasVariableAperture else {
+            haptics.play(.limit)
+            return
+        }
+        switch settings.program {
+        case .program: setProgram(.aperturePriority)
+        case .shutterPriority: setProgram(.manual)
+        case .aperturePriority, .manual: break
+        }
+        settings.exposure.aperture = settings.limits.clampAperture(aperture)
+        applyExposure()
+    }
+
     func setBias(_ bias: Float) {
-        guard settings.exposureMode == .auto else { return }
-        settings.bias = settings.limits.clampBias(bias)
-        engine.send(.exposure(.bias(settings.bias)))
+        guard !settings.evIsMeteredManual else { return }
+        settings.exposure.bias = settings.limits.clampBias(bias)
+        applyExposure()
     }
 
-    func setTemperature(_ kelvin: Float) {
-        settings.whiteBalanceAuto = false
-        settings.temperature = kelvin
-        engine.send(.whiteBalance(.locked(temperature: kelvin, tint: settings.tint)))
+    func toggleAutoISO() {
+        guard settings.program == .manual else { return }
+        settings.exposure.isoAuto.toggle()
+        applyExposure()
+        haptics.play(.modeChange)
     }
 
-    func resetWhiteBalance() {
-        settings.whiteBalanceAuto = true
-        engine.send(.whiteBalance(.auto))
+    // MARK: - White balance
+
+    func setWhiteBalance(_ stop: WhiteBalanceStop) {
+        settings.whiteBalance = stop
+        sendWhiteBalance()
     }
 
-    func setLensPosition(_ position: Float) {
-        settings.focusManual = true
-        settings.lensPosition = ExposureMath.clamp(position, 0, 1)
-        engine.send(.focus(.locked(lensPosition: settings.lensPosition)))
+    func setTint(_ tint: Float) {
+        settings.tint = ExposureMath.clamp(tint, -150, 150)
+        if settings.whiteBalance == .auto, telemetry.liveTemperature > 0 {
+            // Tint needs a locked temperature: start from the current auto value.
+            settings.whiteBalance = .kelvin(Int((telemetry.liveTemperature / 100).rounded()) * 100)
+        }
+        sendWhiteBalance()
     }
 
-    /// Tap-to-focus. In manual exposure only focus moves (F7); a tap also leaves manual focus.
+    private func sendWhiteBalance() {
+        if let kelvin = settings.whiteBalance.kelvinValue {
+            engine.send(.whiteBalance(.locked(temperature: kelvin, tint: settings.tint)))
+        } else {
+            engine.send(.whiteBalance(.auto))
+        }
+        scheduleSave()
+    }
+
+    // MARK: - Focus (Slice 2 §8)
+
+    func setFocusMode(_ mode: FocusMode) {
+        guard mode != settings.focusMode else { return }
+        settings.focusMode = mode
+        switch mode {
+        case .continuous:
+            engine.send(.focus(.continuousAuto(point: nil)))
+        case .single:
+            engine.send(.focus(.singleAuto(point: nil)))
+        case .manual:
+            let position = telemetry.liveLensPosition > 0 ? telemetry.liveLensPosition : settings.lensPosition
+            settings.lensPosition = position
+            engine.send(.focus(.locked(lensPosition: position)))
+        }
+        applyOverlayConfig()
+        scheduleSave()
+    }
+
+    /// Tap on the viewfinder: AF-S focuses once and confirms, AF-C tracks the point, MF only moves
+    /// the loupe / focus-snap region. In P/A/S the tap also meters there.
     func focus(atViewPoint point: CGPoint, devicePoint: CGPoint) {
-        settings.focusManual = false
-        engine.send(.focus(.continuousAuto(point: devicePoint)))
-        if settings.exposureMode == .auto {
+        if settings.activeTile != nil || settings.showFnSheet {
+            // A tap on the viewfinder first dismisses the tray (Slice 2 §4).
+            settings.activeTile = nil
+            settings.showFnSheet = false
+            return
+        }
+        if let uv = status.viewfinder.normalizedPoint(for: point) {
+            focusPointUV = uv
+            updateFocusRegion()
+        }
+        switch settings.focusMode {
+        case .single:
+            awaitingFocusLock = true
+            sawFocusAdjusting = false
+            engine.send(.focus(.singleAuto(point: devicePoint)))
+            scheduleFocusLockFallback()
+        case .continuous:
+            engine.send(.focus(.continuousAuto(point: devicePoint)))
+        case .manual:
+            break
+        }
+        if settings.program != .manual || settings.exposure.isoAuto {
             engine.send(.exposurePoint(devicePoint))
         }
         focusTapCounter += 1
         status.focusIndicator = FocusIndicator(point: status.viewfinder.clampedToVideo(point), id: focusTapCounter)
         let tapID = focusTapCounter
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        let hold: TimeInterval = settings.focusMode == .single ? 2.0 : 1.0
+        DispatchQueue.main.asyncAfter(deadline: .now() + hold) { [weak self] in
             guard let self else { return }
             MainActor.assumeIsolated {
                 if self.status.focusIndicator?.id == tapID {
                     self.status.focusIndicator = nil
                 }
             }
+        }
+    }
+
+    /// If the lens was already sharp, `isAdjustingFocus` may never go true: confirm anyway.
+    private func scheduleFocusLockFallback() {
+        focusLockWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                if self.awaitingFocusLock, !self.sawFocusAdjusting { self.confirmFocusLock() }
+            }
+        }
+        focusLockWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+    }
+
+    private func confirmFocusLock() {
+        awaitingFocusLock = false
+        focusLockWorkItem?.cancel()
+        status.focusIndicator?.locked = true
+        haptics.play(.focusLock)
+    }
+
+    func mfWheelBegan() {
+        if settings.focusMode != .manual { setFocusMode(.manual) }
+        isPullingFocus = true
+        peakDetector.reset()
+        loupeCloseWorkItem?.cancel()
+        updateFocusRegion()
+        engine.pipeline.updateConfig {
+            $0.sharpnessEnabled = true
+            $0.loupeEnabled = true
+        }
+        status.isLoupeVisible = true
+        previewView?.setLoupeVisible(true)
+    }
+
+    /// - Parameters:
+    ///   - translation: Points moved since the last call (positive = towards infinity).
+    ///   - speed: Finger speed in points per second.
+    func mfWheelMoved(by translation: Double, speed: Double) {
+        let old = settings.lensPosition
+        let new = FocusMath.position(after: translation, speed: speed, from: old)
+        guard new != old else { return }
+        settings.lensPosition = new
+        engine.send(.focus(.locked(lensPosition: new)))
+        if FocusMath.detentIndex(for: old) != FocusMath.detentIndex(for: new) {
+            haptics.play(new <= 0 || new >= 1 ? .limit : .focusTick)
+        }
+    }
+
+    func mfWheelEnded() {
+        isPullingFocus = false
+        scheduleSave()
+        scheduleLoupeClose(after: 0.6)
+    }
+
+    private func scheduleLoupeClose(after delay: TimeInterval) {
+        loupeCloseWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                guard !self.isPullingFocus else { return }
+                self.engine.pipeline.updateConfig {
+                    $0.sharpnessEnabled = false
+                    $0.loupeEnabled = false
+                }
+                self.status.isLoupeVisible = false
+                self.previewView?.setLoupeVisible(false)
+            }
+        }
+        loupeCloseWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// 4× ⇄ 8× (8× only when the video frame has real pixels for it, §8).
+    func toggleLoupeZoom() {
+        let next = settings.loupeZoom == 4 && canUseEightTimesLoupe ? 8 : 4
+        settings.loupeZoom = next
+        updateLoupeWindow()
+        haptics.play(.detent)
+        if status.isLoupeVisible { scheduleLoupeClose(after: 2.0) }
+    }
+
+    var canUseEightTimesLoupe: Bool {
+        max(nativeBufferSize.width, nativeBufferSize.height) > 1920
+    }
+
+    private func updateLoupeWindow() {
+        guard let previewView else { return }
+        let window = previewView.loupeWindow(zoom: settings.loupeZoom)
+        let nearest = settings.loupeZoom >= 8
+        engine.pipeline.updateConfig {
+            $0.loupeWindow = window
+            $0.loupeNearest = nearest
+        }
+    }
+
+    /// The loupe centre and the focus-snap region follow the last focus point.
+    private func updateFocusRegion() {
+        let size: CGFloat = 0.2
+        let roi = CGRect(
+            x: ExposureMath.clamp(focusPointUV.x - size / 2, 0, 1 - size),
+            y: ExposureMath.clamp(focusPointUV.y - size / 2, 0, 1 - size),
+            width: size,
+            height: size
+        )
+        let center = focusPointUV
+        engine.pipeline.updateConfig {
+            $0.sharpnessROI = roi
+            $0.loupeCenter = center
+        }
+        updateLoupeWindow()
+    }
+
+    private func handleSharpness(_ value: Double) {
+        guard isPullingFocus else { return }
+        if peakDetector.add(value) {
+            haptics.play(.focusSnap)
+            engine.pipeline.flashPeaking()
         }
     }
 
@@ -303,9 +587,7 @@ final class CameraController {
         status.isSwitchingLens = true
         expectingLensSwitchHaptic = true
         if !lens.isFront { settings.lastBackLens = lens }
-        // F15: focus returns to AF on a lens change unless the user is in MF.
         engine.switchLens(to: lens)
-        // Safety net: never leave the snapshot up if the first frame is late.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
             guard let self else { return }
             MainActor.assumeIsolated {
@@ -327,7 +609,30 @@ final class CameraController {
         status.isSwitchingLens = false
     }
 
-    // MARK: - Capture options
+    // MARK: - Overlays, RAW, haptics (Fn sheet)
+
+    func updateOverlays(_ change: (inout OverlaySettings) -> Void) {
+        change(&settings.overlays)
+        applyOverlayConfig()
+        updateMotionSampling()
+        scheduleSave()
+    }
+
+    private func applyOverlayConfig() {
+        let overlays = settings.overlays
+        let peaking = settings.peakingActive
+        engine.pipeline.updateConfig {
+            $0.peakingEnabled = peaking
+            $0.peakingColor = overlays.peakingColor.rgba
+            $0.peakingThreshold = overlays.peakingLevel.threshold
+            $0.zebrasEnabled = overlays.zebrasEnabled
+            $0.zebraThreshold = overlays.zebraThreshold.luma
+        }
+    }
+
+    func toggleHistogramExpanded() {
+        settings.histogramExpanded.toggle()
+    }
 
     func toggleRaw() {
         guard settings.rawSupported else {
@@ -335,14 +640,24 @@ final class CameraController {
             return
         }
         settings.rawEnabled.toggle()
-        defaults.set(settings.rawEnabled, forKey: CameraSettings.rawEnabledKey)
         engine.setRawEnabled(settings.effectiveRaw)
+        updateShotsLeft()
+        scheduleSave()
     }
 
-    func toggleGrid() {
-        settings.showGrid.toggle()
-        if settings.showGrid { motion.start() } else { motion.stop() }
+    func setHapticsEnabled(_ enabled: Bool) {
+        settings.haptics.enabled = enabled
+        haptics.isEnabled = enabled
+        scheduleSave()
     }
+
+    func setHapticIntensity(_ intensity: Float) {
+        settings.haptics.intensity = ExposureMath.clamp(intensity, 0.5, 1.0)
+        haptics.intensityScale = settings.haptics.intensity
+        scheduleSave()
+    }
+
+    // MARK: - Capture
 
     func shutterPressed() {
         guard status.canCapture else {
@@ -387,11 +702,26 @@ final class CameraController {
             if !lens.isFront { settings.lastBackLens = lens }
             settings.limits = limits
             settings.rawSupported = rawSupported
-            settings.iso = limits.clampISO(settings.iso)
-            settings.shutter = limits.clampDuration(settings.shutter)
-            settings.bias = limits.clampBias(settings.bias)
+            if !settings.availablePrograms.contains(settings.program) {
+                // A without a moving iris on this lens: fall back to P.
+                settings.program = .program
+            }
+            settings.exposure.iso = limits.clampISO(settings.exposure.iso)
+            settings.exposure.shutter = limits.clampDuration(settings.exposure.shutter)
+            settings.exposure.bias = limits.clampBias(settings.exposure.bias)
+            if limits.exposure.hasVariableAperture {
+                settings.exposure.aperture = limits.clampAperture(settings.exposure.aperture)
+            }
+            applyExposure()
+            sendWhiteBalance()
+            if settings.focusMode == .single {
+                engine.send(.focus(.singleAuto(point: nil)))
+            } else if settings.focusMode == .manual && telemetry.liveLensPosition <= 0 {
+                pendingManualFocusLock = true
+            }
             engine.setRawEnabled(settings.effectiveRaw)
             previewView?.refreshGeometry()
+            updateShotsLeft()
             if expectingLensSwitchHaptic {
                 expectingLensSwitchHaptic = false
                 haptics.play(.lensSwitch)
@@ -407,6 +737,23 @@ final class CameraController {
             telemetry.liveTemperature = values.temperature
             telemetry.liveAperture = values.aperture
             telemetry.meterOffset = values.meterOffset
+            if pendingManualFocusLock, values.lensPosition > 0 {
+                pendingManualFocusLock = false
+                if settings.focusMode == .manual {
+                    settings.lensPosition = values.lensPosition
+                    engine.send(.focus(.locked(lensPosition: values.lensPosition)))
+                }
+            }
+
+        case .focusAdjusting(let adjusting):
+            telemetry.isAdjustingFocus = adjusting
+            if awaitingFocusLock {
+                if adjusting {
+                    sawFocusAdjusting = true
+                } else if sawFocusAdjusting {
+                    confirmFocusLock()
+                }
+            }
 
         case .readiness(let ready):
             status.isReady = ready
@@ -425,7 +772,6 @@ final class CameraController {
             status.show(Banner(kind: .sessionFailed, message: message, action: .retrySession))
 
         case .snapshot(let image):
-            // A late snapshot (after the new lens's first frame) must not cover the live image.
             if status.isSwitchingLens { previewView?.showSnapshot(image) }
 
         case .firstFrameAfterSwitch:
@@ -441,9 +787,10 @@ final class CameraController {
         case .captureFinished(let outcome, let thumbnail):
             status.inFlightCount = max(0, status.inFlightCount - 1)
             switch outcome {
-            case .saved(let destination, _):
+            case .saved(let destination, _, let bytes):
                 if let thumbnail { status.lastThumbnail = thumbnail }
                 haptics.play(.saved)
+                recordShotSize(bytes, raw: settings.effectiveRaw)
                 if case .documents = destination { checkPhotosAccess(request: false) }
             case .savePending:
                 status.show(Banner(kind: .saveFailed, message: "A photo couldn't be saved. It is kept on the phone.", action: .retrySave))
@@ -472,29 +819,49 @@ final class CameraController {
         if let exposure = applied.exposure {
             switch exposure {
             case .auto(let bias):
-                if settings.exposureMode == .auto { settings.bias = bias }
+                if settings.program == .program { settings.exposure.bias = bias }
             case .custom(let iso, let duration):
-                if settings.exposureMode == .manual {
-                    settings.iso = iso
-                    settings.shutter = duration
+                if settings.program == .manual && !settings.exposure.isoAuto {
+                    settings.exposure.iso = iso
+                    settings.exposure.shutter = duration
+                } else if settings.program == .shutterPriority || settings.program == .manual {
+                    settings.exposure.shutter = duration
                 }
+            case .priority(let aperture, let duration, let iso, _):
+                if let aperture { settings.exposure.aperture = aperture }
+                if let duration, settings.program == .shutterPriority || settings.program == .manual {
+                    settings.exposure.shutter = duration
+                }
+                if let iso, settings.program == .manual { settings.exposure.iso = iso }
             }
         }
-        if let whiteBalance = applied.whiteBalance {
-            settings.whiteBalanceAuto = whiteBalance.isAuto
-            if !whiteBalance.isAuto {
-                settings.temperature = whiteBalance.temperature
-                settings.tint = whiteBalance.tint
-            }
+        if let whiteBalance = applied.whiteBalance, !whiteBalance.isAuto {
+            settings.tint = whiteBalance.tint
         }
-        if let focus = applied.focus {
-            switch focus {
-            case .locked(let position):
-                settings.focusManual = true
-                settings.lensPosition = position
-            case .continuousAuto, .singleAuto:
-                settings.focusManual = false
-            }
+        if let focus = applied.focus, case .locked(let position) = focus {
+            settings.lensPosition = position
+        }
+    }
+
+    // MARK: - Motion and level (Slice 2 §9)
+
+    private func handleMotion(_ reading: MotionReading) {
+        telemetry.rollDegrees = reading.rollDegrees
+        telemetry.pitchDegrees = reading.pitchDegrees
+        let becameLevel = levelIndicator.update(rollDegrees: reading.rollDegrees, pitchDegrees: reading.pitchDegrees)
+        telemetry.rollIsLevel = levelIndicator.rollIsLevel
+        telemetry.pitchIsLevel = levelIndicator.pitchIsLevel
+        if becameLevel, settings.overlays.levelEnabled {
+            haptics.play(.level)
+        }
+    }
+
+    private func updateMotionSampling() {
+        let needed = settings.overlays.levelEnabled || settings.overlays.levelLine
+        if needed && status.authorization == .authorized {
+            motion.start()
+        } else {
+            motion.stop()
         }
     }
 
@@ -547,18 +914,21 @@ final class CameraController {
         }
     }
 
-    /// Free-space policy (§11).
+    // MARK: - Storage and shots left
+
     private func checkStorage() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let url = URL(fileURLWithPath: NSHomeDirectory())
             let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            let level = StoragePolicy.level(forAvailableBytes: values?.volumeAvailableCapacityForImportantUsage)
+            let bytes = values?.volumeAvailableCapacityForImportantUsage
             guard let self else { return }
-            runOnMain { self.applyStorage(level) }
+            runOnMain { self.applyStorage(bytes) }
         }
     }
 
-    private func applyStorage(_ level: StoragePolicy.Level) {
+    private func applyStorage(_ bytes: Int64?) {
+        freeBytes = bytes
+        let level = StoragePolicy.level(forAvailableBytes: bytes)
         let wasSuppressed = settings.rawSuppressedForStorage
         switch level {
         case .ok:
@@ -577,6 +947,46 @@ final class CameraController {
         if wasSuppressed != settings.rawSuppressedForStorage {
             engine.setRawEnabled(settings.effectiveRaw)
         }
+        updateShotsLeft()
+    }
+
+    /// Running average of real shot sizes per format (starts from typical 48 MP sizes).
+    private func recordShotSize(_ bytes: Int, raw: Bool) {
+        guard bytes > 0 else { return }
+        let key = raw ? Self.rawSizeKey : Self.heifSizeKey
+        let previous = defaults.double(forKey: key)
+        let average = previous > 0 ? previous * 0.7 + Double(bytes) * 0.3 : Double(bytes)
+        defaults.set(average, forKey: key)
+        updateShotsLeft()
+    }
+
+    private func updateShotsLeft() {
+        guard let freeBytes else {
+            telemetry.shotsLeft = nil
+            return
+        }
+        let raw = settings.effectiveRaw
+        let stored = defaults.double(forKey: raw ? Self.rawSizeKey : Self.heifSizeKey)
+        let average = stored > 0 ? stored : (raw ? 80_000_000 : 8_000_000)
+        telemetry.shotsLeft = max(0, Int(Double(freeBytes) / average))
+    }
+
+    // MARK: - Persistence (Slice 2 §11)
+
+    private func scheduleSave() {
+        saveWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated { self.saveProfileNow() }
+        }
+        saveWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: item)
+    }
+
+    private func saveProfileNow() {
+        saveWorkItem?.cancel()
+        settings.store(into: &profile)
+        profile.save(to: defaults)
     }
 }
 

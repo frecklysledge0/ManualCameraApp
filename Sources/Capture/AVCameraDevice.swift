@@ -35,6 +35,7 @@ final class AVCameraDevice: CameraDevice {
         limits.supportsFocusPointOfInterest = device.isFocusPointOfInterestSupported
         limits.supportsExposurePointOfInterest = device.isExposurePointOfInterestSupported
         limits.aperture = device.lensAperture
+        limits.exposure = ApertureSupport.capability(of: device)
         return limits
     }
 
@@ -50,6 +51,7 @@ final class AVCameraDevice: CameraDevice {
 
     var currentBias: Float { device.exposureTargetBias }
     var currentLensPosition: Float { device.lensPosition }
+    var currentAperture: Float { device.lensAperture }
     var exposureTargetOffset: Float { device.exposureTargetOffset }
 
     var currentWhiteBalance: (temperature: Float, tint: Float) {
@@ -94,6 +96,16 @@ final class AVCameraDevice: CameraDevice {
         let safeDuration = max(min(requested, format.maxExposureDuration), format.minExposureDuration)
         let safeISO = ExposureMath.clamp(iso, format.minISO, format.maxISO)
         device.setExposureModeCustom(duration: safeDuration, iso: safeISO, completionHandler: nil)
+    }
+
+    func applyPriorityExposure(aperture: Float?, duration: Double?, iso: Float?) {
+        if ApertureSupport.applyPriority(aperture: aperture, duration: duration, iso: iso, to: device) {
+            return
+        }
+        // Without the iOS 27 API a fully specified exposure still works as plain custom exposure.
+        if let duration, let iso {
+            applyCustomExposure(duration: duration, iso: iso)
+        }
     }
 
     func applyExposurePoint(_ point: CGPoint) {
