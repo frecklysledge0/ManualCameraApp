@@ -23,24 +23,13 @@ enum ApertureSupport {
                 capability.hasVariableAperture = true
                 capability.minAperture = format.minLensAperture
                 capability.maxAperture = format.maxLensAperture
-                // Full control: every 1/3 stop across the iris's range that the format accepts,
-                // not only Apple's recommended stops. If the format accepts only the recommended
-                // stops, the filter leaves exactly those.
-                let accepts: (Float) -> Bool = { stop in
+                // The iris's recommended stops (ƒ/1.48, 1.8, 2.8, 4 on iPhone 18 Pro).
+                let stops = format.recommendedLensApertureStops.filter { stop in
                     format.supportsExposureModeCustom(
                         lensAperture: stop,
                         duration: AVCaptureDevice.autoExposureDuration,
                         iso: AVCaptureDevice.autoISO
                     )
-                }
-                let table = ExposureMath.apertureTable(
-                    min: format.minLensAperture,
-                    max: format.maxLensAperture,
-                    recommended: format.recommendedLensApertureStops
-                )
-                var stops = table.filter(accepts)
-                if stops.count < 2 {
-                    stops = format.recommendedLensApertureStops.filter(accepts)
                 }
                 capability.apertureStops = stops.sorted()
                 capability.supportsAperturePriority = !stops.isEmpty

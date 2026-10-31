@@ -1,7 +1,7 @@
 import XCTest
 @testable import ManualCameraApp
 
-/// F4 and §6.3: one shutter press → exactly one Photos item with both resources, the temp DNG is
+/// F4 and §6.3: one shutter press → exactly one save of the shot's files, the temp DNG is
 /// cleaned up, and the processor reports exactly once and is released on every path.
 final class PhotoCaptureProcessorTests: XCTestCase {
 

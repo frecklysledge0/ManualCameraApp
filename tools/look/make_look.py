@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Builds the MF Natural Colour look from look.json (Slice 3 §6 "Look authoring").
+"""Builds the Edition's looks from look.json (Slice 3 §6 "Look authoring").
 
     python3 tools/look/make_look.py
 
 Writes:
-  Resources/MFNaturalColour.cube           65³ 3D LUT (input in the cube-root shaper space)
+  Resources/MFNaturalColour.cube           65³ 3D LUT of the base look (cube-root shaper input)
+  Resources/Looks/<id>.cube                 one LUT per extra look in look.json "looks"
   Resources/look.json                       the exact source, bundled for the tests
   Sources/Capture/Edition/LookConstants.swift   the same numbers for Swift / Metal
+
+Every look is an original rendering built from the base look plus overrides (colour, tone,
+white balance, monochrome mix, split toning, fade), so all looks share one tone and gamut model.
 
 The LUT bakes, in order: colour rendering (hue/chroma moves in OKLCh), skin protection, and the
 filmic tone curve applied to luminance with chroma preserved plus highlight desaturation. Grain is
@@ -85,13 +89,39 @@ def tone_curve(y: np.ndarray, tone: dict) -> np.ndarray:
     return np.where(contrast <= s0, contrast, shoulder)
 
 
+def merged(base: dict, overrides: dict) -> dict:
+    """Deep merge: dictionaries merge key by key, everything else replaces."""
+    out = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merged(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def into_gamut(rgb: np.ndarray, luminance: np.ndarray) -> np.ndarray:
+    """Pulls each colour towards its luminance until every channel is in [0, 1] (keeps hue)."""
+    Yc = np.clip(luminance, 0.0, 1.0)[:, None]
+    over = np.where(rgb > 1.0, (1.0 - Yc) / np.maximum(rgb - Yc, 1e-9), 1.0)
+    under = np.where(rgb < 0.0, Yc / np.maximum(Yc - rgb, 1e-9), 1.0)
+    t = np.clip(np.minimum(over.min(axis=1), under.min(axis=1)), 0.0, 1.0)[:, None]
+    return np.clip(Yc + t * (rgb - Yc), 0.0, 1.0)
+
+
 def render(linear: np.ndarray, look: dict) -> np.ndarray:
     """Applies colour rendering, skin protection and tone to linear Display P3 (N×3)."""
     colour = look["colour"]
     skin = look["skin"]
     tone = look["tone"]
 
-    lab = p3_to_oklab(np.maximum(linear, 0.0))
+    linear = np.maximum(linear, 0.0)
+    if "whiteBalance" in look:
+        # A gentle overall warm / cool cast, as camera-side gains.
+        wb = look["whiteBalance"]
+        linear = linear * np.array([wb.get("red", 1.0), wb.get("green", 1.0), wb.get("blue", 1.0)])
+
+    lab = p3_to_oklab(linear)
     L = lab[:, 0]
     C = np.hypot(lab[:, 1], lab[:, 2])
     h = np.degrees(np.arctan2(lab[:, 2], lab[:, 1])) % 360.0
@@ -123,6 +153,12 @@ def render(linear: np.ndarray, look: dict) -> np.ndarray:
     lab = np.stack([L, C * np.cos(hr), C * np.sin(hr)], axis=1)
     rgb = oklab_to_p3(lab)
 
+    if "monochrome" in look:
+        # Black and white through a colour filter: a weighted mix of the scene's channels.
+        mix = np.array(look["monochrome"]["mix"], dtype=float)
+        mono = np.maximum(np.maximum(linear, 0.0) @ (mix / mix.sum()), 0.0)
+        rgb = np.repeat(mono[:, None], 3, axis=1)
+
     # 3. Tone on luminance with chroma preserved, then highlight desaturation near white.
     Y = np.maximum(rgb @ LUMA, 0.0)
     Yt = tone_curve(Y, tone)
@@ -131,12 +167,25 @@ def render(linear: np.ndarray, look: dict) -> np.ndarray:
     w = smoothstep(tone["highlightDesaturationStart"], 1.0, Yt) * tone["highlightDesaturation"]
     rgb = rgb * (1.0 - w[:, None]) + Yt[:, None] * w[:, None]
 
-    # Gamut: pull towards the luminance until every channel is in [0, 1] (keeps hue).
-    Yc = np.clip(Yt, 0.0, 1.0)[:, None]
-    over = np.where(rgb > 1.0, (1.0 - Yc) / np.maximum(rgb - Yc, 1e-9), 1.0)
-    under = np.where(rgb < 0.0, Yc / np.maximum(Yc - rgb, 1e-9), 1.0)
-    t = np.clip(np.minimum(over.min(axis=1), under.min(axis=1)), 0.0, 1.0)[:, None]
-    rgb = Yc + t * (rgb - Yc)
+    rgb = into_gamut(rgb, Yt)
+
+    if "splitTone" in look:
+        # Tint shadows and highlights in OKLab (perceptual), weighted by display lightness.
+        st = look["splitTone"]
+        lab = p3_to_oklab(rgb)
+        Ld = np.clip(lab[:, 0], 0.0, 1.0)
+        shadow = (1.0 - smoothstep(0.0, st.get("balance", 0.55), Ld)) * st["shadowStrength"]
+        light = smoothstep(st.get("balance", 0.55), 1.0, Ld) * st["highlightStrength"]
+        for weight, hue in ((shadow, st["shadowHue"]), (light, st["highlightHue"])):
+            angle = math.radians(hue)
+            lab[:, 1] += weight * math.cos(angle)
+            lab[:, 2] += weight * math.sin(angle)
+        rgb = into_gamut(oklab_to_p3(lab), np.maximum(oklab_to_p3(lab) @ LUMA, 0.0))
+
+    if "fade" in look:
+        # Lifted blacks and slightly lowered whites, like a faded print.
+        fade = look["fade"]
+        rgb = fade.get("black", 0.0) + (fade.get("white", 1.0) - fade.get("black", 0.0)) * rgb
     return np.clip(rgb, 0.0, 1.0)
 
 
@@ -166,9 +215,36 @@ def main() -> int:
         np.savetxt(f, out, fmt="%.5f")
     (ROOT / "Resources" / "look.json").write_bytes(raw)
 
+    # Extra looks: base look + overrides, each in its own (smaller) cube.
+    looks_dir = ROOT / "Resources" / "Looks"
+    looks_dir.mkdir(parents=True, exist_ok=True)
+    for stale in looks_dir.glob("*.cube"):
+        stale.unlink()
+    descriptors = [(look.get("id", "natural"), look["name"], "MFNaturalColour", size)]
+    for extra in look.get("looks", []):
+        variant = merged({k: v for k, v in look.items() if k != "looks"}, extra.get("overrides", {}))
+        extra_size = int(extra.get("lutSize", 33))
+        es = np.linspace(0.0, 1.0, extra_size)
+        eb, eg, er = np.meshgrid(es, es, es, indexing="ij")
+        e_shaped = np.stack([er.ravel(), eg.ravel(), eb.ravel()], axis=1)
+        e_out = render(max_linear * e_shaped ** exponent, variant)
+        resource = f"Look-{extra['id']}"
+        with (looks_dir / f"{resource}.cube").open("w") as f:
+            f.write(f'TITLE "{extra["name"]}"\n')
+            f.write(f"# source-sha256: {digest}\n")
+            f.write(f"# shaper: s = (linearP3 / {max_linear:g})^(1/{exponent:g})\n")
+            f.write(f"LUT_3D_SIZE {extra_size}\n")
+            f.write("DOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n")
+            np.savetxt(f, e_out, fmt="%.5f")
+        descriptors.append((extra["id"], extra["name"], resource, extra_size))
+        print(f"look {extra['id']:>10}: grey 0.18 -> {np.round(render(np.array([[0.18] * 3]), variant)[0], 3)}")
+
     grain = look["grain"]
     develop = look["develop"]
     weights = ", ".join(f"{w}" for w in grain["octaveWeights"])
+    look_lines = "\n".join(
+        f'        LookDescriptor(id: "{i}", name: "{n}", resource: "{r}", lutSize: {z}),' for i, n, r, z in descriptors
+    )
     swift = f'''// Generated by tools/look/make_look.py from tools/look/look.json — do not edit by hand.
 // Change look.json and re-run the script; the LUT and these constants stay in sync.
 
@@ -196,6 +272,11 @@ enum LookConstants {{
     static let grainISOBoostPerStop: Float = {grain["isoBoostPerStop"]}
     static let grainISOBoostMax: Float = {grain["isoBoostMax"]}
     static let previewGrainScale: Float = {grain["previewAmplitudeScale"]}
+
+    // Looks (the first is the base look and the default)
+    static let looks: [LookDescriptor] = [
+{look_lines}
+    ]
 }}
 '''
     swift_path = ROOT / "Sources" / "Capture" / "Edition" / "LookConstants.swift"

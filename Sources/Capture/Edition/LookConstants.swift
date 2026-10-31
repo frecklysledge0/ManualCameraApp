@@ -3,8 +3,8 @@
 
 enum LookConstants {
     static let name = "MF Natural Colour"
-    static let version = 1
-    static let sourceHash = "ee0670e06475f423201403a8a5e018f3b5e2250addd4e6fbfd3d271039010159"
+    static let version = 2
+    static let sourceHash = "ec73b8e9e10d14ff62166a905dd7387a927ff2ac2f27c41586317ecc941ec606"
     static let lutSize = 65
     static let shaperMaxLinear: Float = 8.0
     static let shaperExponent: Float = 3.0
@@ -25,4 +25,15 @@ enum LookConstants {
     static let grainISOBoostPerStop: Float = 0.12
     static let grainISOBoostMax: Float = 1.6
     static let previewGrainScale: Float = 0.5
+
+    // Looks (the first is the base look and the default)
+    static let looks: [LookDescriptor] = [
+        LookDescriptor(id: "natural", name: "MF Natural Colour", resource: "MFNaturalColour", lutSize: 65),
+        LookDescriptor(id: "warm", name: "Warm Portrait", resource: "Look-warm", lutSize: 33),
+        LookDescriptor(id: "classic", name: "Classic Muted", resource: "Look-classic", lutSize: 33),
+        LookDescriptor(id: "cinematic", name: "Cinematic", resource: "Look-cinematic", lutSize: 33),
+        LookDescriptor(id: "faded", name: "Faded Film", resource: "Look-faded", lutSize: 33),
+        LookDescriptor(id: "mono", name: "Mono", resource: "Look-mono", lutSize: 33),
+        LookDescriptor(id: "mono-red", name: "Mono Red Filter", resource: "Look-mono-red", lutSize: 33),
+    ]
 }

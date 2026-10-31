@@ -12,6 +12,7 @@ final class MFLookKernel: CIImageProcessorKernel {
         static let amplitude = "amplitude"
         static let scale = "scale"
         static let seed = "seed"
+        static let look = "look"
     }
 
     enum KernelError: Error {
@@ -29,7 +30,10 @@ final class MFLookKernel: CIImageProcessorKernel {
 
     override class func process(with inputs: [CIImageProcessorInput]?, arguments: [String: Any]?, output: CIImageProcessorOutput) throws {
         let resources = LookResources.shared
-        guard let pipeline = resources.stillPipeline, let lut = resources.lut, let noise = resources.noise else {
+        let lookID = arguments?[Argument.look] as? String ?? LookDescriptor.defaultID
+        guard let pipeline = resources.stillPipeline,
+              let lut = resources.lut(for: lookID) ?? resources.lut(for: LookDescriptor.defaultID),
+              let noise = resources.noise else {
             throw KernelError.resourcesMissing
         }
         guard let input = inputs?.first,
@@ -46,6 +50,7 @@ final class MFLookKernel: CIImageProcessorKernel {
             grainAmplitude: amplitude,
             grainScale: scale,
             seed: seed,
+            lutSize: lut.width,
             origin: SIMD2<Float>(Float(output.region.minX), Float(output.region.minY))
         )
         encoder.setComputePipelineState(pipeline)
@@ -68,6 +73,9 @@ final class EditionDeveloper: @unchecked Sendable {
         var framing: FramingMode
         var grain: GrainLevel
         var iso: Float
+        var lookID: String = LookDescriptor.defaultID
+        /// Output pixel count; larger crops are scaled down (0 = keep the full resolution).
+        var maxPixels: Int = 0
     }
 
     enum DevelopError: Error {
@@ -121,8 +129,22 @@ final class EditionDeveloper: @unchecked Sendable {
         let crop = FramingMath.cropRect(for: options.framing, in: extent.size).offsetBy(dx: extent.minX, dy: extent.minY)
         image = image.cropped(to: crop).transformed(by: CGAffineTransform(translationX: -crop.minX, y: -crop.minY))
 
+        // Output size: scale the crop down to the chosen photo size (Lanczos), before the look so
+        // grain is generated at the final resolution.
+        let cropPixels = Double(crop.width * crop.height)
+        if options.maxPixels > 0, cropPixels > Double(options.maxPixels) * 1.02 {
+            let factor = (Double(options.maxPixels) / cropPixels).squareRoot()
+            let scaled = image.applyingFilter("CILanczosScaleTransform", parameters: [
+                kCIInputScaleKey: factor,
+                kCIInputAspectRatioKey: 1.0
+            ])
+            let target = CGRect(x: 0, y: 0, width: (crop.width * factor).rounded(.down), height: (crop.height * factor).rounded(.down))
+            image = scaled.cropped(to: target)
+        }
+        let outputHeight = image.extent.height
+
         let amplitude = GrainMath.amplitude(for: options.grain, iso: options.iso)
-        let scale = GrainMath.scale(forImageHeight: crop.height, level: options.grain)
+        let scale = GrainMath.scale(forImageHeight: outputHeight, level: options.grain)
         let seed = GrainMath.seed(for: item.id)
         image = try MFLookKernel.apply(
             withExtent: image.extent,
@@ -130,7 +152,8 @@ final class EditionDeveloper: @unchecked Sendable {
             arguments: [
                 MFLookKernel.Argument.amplitude: NSNumber(value: amplitude),
                 MFLookKernel.Argument.scale: NSNumber(value: scale),
-                MFLookKernel.Argument.seed: NSNumber(value: seed)
+                MFLookKernel.Argument.seed: NSNumber(value: seed),
+                MFLookKernel.Argument.look: options.lookID
             ]
         )
 
@@ -149,7 +172,7 @@ final class EditionDeveloper: @unchecked Sendable {
         developed.processedData = data
         developed.processedType = "public.heic"
         let elapsed = (ProcessInfo.processInfo.systemUptime - start) * 1000
-        logger.info("Developed \(Int(crop.width))×\(Int(crop.height)) from \(fromRaw ? "RAW" : "HEIF", privacy: .public) in \(elapsed, format: .fixed(precision: 0)) ms")
+        logger.info("Developed \(Int(image.extent.width))×\(Int(image.extent.height)) \(options.lookID, privacy: .public) from \(fromRaw ? "RAW" : "HEIF", privacy: .public) in \(elapsed, format: .fixed(precision: 0)) ms")
         return developed
     }
 

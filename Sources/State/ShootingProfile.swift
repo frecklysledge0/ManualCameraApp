@@ -113,6 +113,9 @@ struct ShootingProfile: Equatable, Codable, Sendable {
     var grain: GrainLevel = .fine
     var shutterSound: ShutterSoundVolume = .low
     var previewGrain = false
+    var photoSize: PhotoSize = .mp24
+    var exactManualExposure = false
+    var lookID = LookDescriptor.defaultID
 
     static let storageKey = "shootingProfile.v1"
 
@@ -150,6 +153,7 @@ struct ShootingProfile: Equatable, Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case program, modeValues, lensKind, focusMode, whiteBalance, tint, overlays, captureFormat, haptics, theme
         case framing, grain, shutterSound, previewGrain
+        case photoSize, exactManualExposure, lookID
         // Slices 1–2 stored a Bool; read it when migrating.
         case rawEnabled
     }
@@ -170,6 +174,9 @@ struct ShootingProfile: Equatable, Codable, Sendable {
         try container.encode(grain, forKey: .grain)
         try container.encode(shutterSound, forKey: .shutterSound)
         try container.encode(previewGrain, forKey: .previewGrain)
+        try container.encode(photoSize, forKey: .photoSize)
+        try container.encode(exactManualExposure, forKey: .exactManualExposure)
+        try container.encode(lookID, forKey: .lookID)
     }
 
     init(from decoder: Decoder) throws {
@@ -195,5 +202,8 @@ struct ShootingProfile: Equatable, Codable, Sendable {
         grain = (try? container.decodeIfPresent(GrainLevel.self, forKey: .grain)) ?? defaults.grain
         shutterSound = (try? container.decodeIfPresent(ShutterSoundVolume.self, forKey: .shutterSound)) ?? defaults.shutterSound
         previewGrain = (try? container.decodeIfPresent(Bool.self, forKey: .previewGrain)) ?? defaults.previewGrain
+        photoSize = (try? container.decodeIfPresent(PhotoSize.self, forKey: .photoSize)) ?? defaults.photoSize
+        exactManualExposure = (try? container.decodeIfPresent(Bool.self, forKey: .exactManualExposure)) ?? defaults.exactManualExposure
+        lookID = (try? container.decodeIfPresent(String.self, forKey: .lookID)) ?? defaults.lookID
     }
 }

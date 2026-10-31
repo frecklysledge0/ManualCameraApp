@@ -1,59 +1,71 @@
 import AVFoundation
 
-/// Camera Control integration (iPhone 16 and later, iOS 18+).
+/// Camera Control integration (iPhone 16 and later, iOS 18+), the same mechanism Blackmagic
+/// Camera uses: a light press opens an overlay with the app's controls and sliding the finger on
+/// Camera Control changes the selected one; a light double-press switches control.
 ///
-/// iOS gives apps no direct "light press" event. A light press opens the Camera Control overlay
-/// with the app's controls, and the session's controls delegate reports that, so the app treats
-/// "controls became active" as the half-press and focuses then. A full click arrives separately
-/// through `AVCaptureEventInteraction` (see `PreviewView`).
+/// iOS gives apps no separate "light press" event. The session's controls delegate reports when
+/// the overlay opens, so the app treats that moment as the half-press and focuses. A full click
+/// arrives separately through `AVCaptureEventInteraction` (see `PreviewView`).
 @available(iOS 18.0, *)
 @MainActor
 final class CameraControlSet {
 
-    /// Ascending ƒ-numbers (empty on fixed-aperture lenses).
-    let apertureStops: [Float]
-    let evStops: [Float]
-    let aperture: AVCaptureSlider?
-    let exposure: AVCaptureSlider?
-    let focus: AVCaptureSlider
+    /// What the controls were built from; a change rebuilds them.
+    struct Content: Equatable {
+        var shutterStops: [Double]
+        var isoStops: [Float]
+        /// Ascending ƒ-numbers (empty on fixed-aperture lenses).
+        var apertureStops: [Float]
+        var evStops: [Float]
+        var lensTitles: [String]
+    }
 
+    struct Actions {
+        var shutter: @MainActor @Sendable (Int) -> Void
+        var iso: @MainActor @Sendable (Int) -> Void
+        var aperture: @MainActor @Sendable (Int) -> Void
+        var exposure: @MainActor @Sendable (Float) -> Void
+        var focus: @MainActor @Sendable (Float) -> Void
+        var lens: @MainActor @Sendable (Int) -> Void
+    }
+
+    let content: Content
+    private let shutter: AVCaptureIndexPicker?
+    private let iso: AVCaptureIndexPicker?
+    private let aperture: AVCaptureIndexPicker?
+    private let exposure: AVCaptureSlider?
+    private let focus: AVCaptureSlider
+    private let lens: AVCaptureIndexPicker?
+
+    /// In the order the overlay lists them.
     var controls: [AVCaptureControl] {
         var list: [AVCaptureControl] = []
+        if let shutter { list.append(shutter) }
+        if let iso { list.append(iso) }
         if let aperture { list.append(aperture) }
         if let exposure { list.append(exposure) }
         list.append(focus)
+        if let lens { list.append(lens) }
         return list
     }
 
     /// The actions run on the main queue.
-    init(
-        apertureStops: [Float],
-        evStops: [Float],
-        onAperture: @escaping @MainActor @Sendable (Float) -> Void,
-        onExposure: @escaping @MainActor @Sendable (Float) -> Void,
-        onFocus: @escaping @MainActor @Sendable (Float) -> Void
-    ) {
-        self.apertureStops = apertureStops
-        self.evStops = evStops
+    init(content: Content, actions: Actions) {
+        self.content = content
 
-        if apertureStops.count > 1 {
-            let slider = AVCaptureSlider("Aperture", symbolName: "camera.aperture", values: apertureStops)
-            slider.localizedValueFormat = "ƒ/%.1f"
-            slider.prominentValues = apertureStops.filter { ExposureMath.isFullStop(aperture: $0) }
-            slider.setActionQueue(.main) { value in
-                MainActor.assumeIsolated { onAperture(value) }
-            }
-            aperture = slider
-        } else {
-            aperture = nil
-        }
+        shutter = Self.picker("Shutter", symbol: "timer", titles: content.shutterStops.map { ExposureMath.formatShutter($0) }, action: actions.shutter)
+        iso = Self.picker("ISO", symbol: "sun.max", titles: content.isoStops.map { ExposureMath.formatISO($0) }, action: actions.iso)
+        aperture = Self.picker("Aperture", symbol: "camera.aperture", titles: content.apertureStops.map { ExposureMath.formatAperture($0) }, action: actions.aperture)
+        lens = Self.picker("Lens", symbol: "camera.viewfinder", titles: content.lensTitles, action: actions.lens)
 
-        if evStops.count > 1 {
-            let slider = AVCaptureSlider("Exposure", symbolName: "plusminus.circle", values: evStops)
+        if content.evStops.count > 1 {
+            let slider = AVCaptureSlider("Exposure", symbolName: "plusminus.circle", values: content.evStops)
             slider.localizedValueFormat = "%+.1f EV"
-            slider.prominentValues = evStops.filter { abs($0 - $0.rounded()) < 0.01 }
+            slider.prominentValues = content.evStops.filter { abs($0 - $0.rounded()) < 0.01 }
+            let onChange = actions.exposure
             slider.setActionQueue(.main) { value in
-                MainActor.assumeIsolated { onExposure(value) }
+                MainActor.assumeIsolated { onChange(value) }
             }
             exposure = slider
         } else {
@@ -61,21 +73,40 @@ final class CameraControlSet {
         }
 
         let focusSlider = AVCaptureSlider("Focus", symbolName: "scope", in: 0...1)
+        let onFocus = actions.focus
         focusSlider.setActionQueue(.main) { value in
             MainActor.assumeIsolated { onFocus(value) }
         }
         focus = focusSlider
     }
 
-    /// Shows the current settings when the overlay opens.
-    func sync(aperture fNumber: Float, bias: Float, lensPosition: Float) {
-        if let aperture, !apertureStops.isEmpty {
-            aperture.value = apertureStops[ExposureMath.nearestIndex(of: fNumber, in: apertureStops)]
+    private static func picker(_ title: String, symbol: String, titles: [String], action: @escaping @MainActor @Sendable (Int) -> Void) -> AVCaptureIndexPicker? {
+        guard titles.count > 1 else { return nil }
+        let picker = AVCaptureIndexPicker(title, symbolName: symbol, localizedIndexTitles: titles)
+        picker.setActionQueue(.main) { index in
+            MainActor.assumeIsolated { action(index) }
         }
-        if let exposure, !evStops.isEmpty {
-            exposure.value = evStops[ExposureMath.nearestLinearIndex(of: bias, in: evStops)]
+        return picker
+    }
+
+    /// Shows the current settings when the overlay opens.
+    func sync(shutter seconds: Double, iso value: Float, aperture fNumber: Float, bias: Float, lensPosition: Float, lensIndex: Int?) {
+        if let shutter, !content.shutterStops.isEmpty {
+            shutter.selectedIndex = ExposureMath.nearestIndex(of: seconds, in: content.shutterStops)
+        }
+        if let iso, !content.isoStops.isEmpty {
+            iso.selectedIndex = ExposureMath.nearestIndex(of: value, in: content.isoStops)
+        }
+        if let aperture, !content.apertureStops.isEmpty {
+            aperture.selectedIndex = ExposureMath.nearestIndex(of: fNumber, in: content.apertureStops)
+        }
+        if let exposure, !content.evStops.isEmpty {
+            exposure.value = content.evStops[ExposureMath.nearestLinearIndex(of: bias, in: content.evStops)]
         }
         focus.value = ExposureMath.clamp(lensPosition, 0, 1)
+        if let lens, let lensIndex, content.lensTitles.indices.contains(lensIndex) {
+            lens.selectedIndex = lensIndex
+        }
     }
 }
 

@@ -19,13 +19,13 @@ struct LookParams {
     var offset2: SIMD2<Float>
     var padding1: SIMD2<Float> = .zero
 
-    static func make(grainAmplitude: Float, grainScale: Float, seed: UInt32, origin: SIMD2<Float> = .zero) -> LookParams {
+    static func make(grainAmplitude: Float, grainScale: Float, seed: UInt32, lutSize: Int, origin: SIMD2<Float> = .zero) -> LookParams {
         let offsets = GrainMath.octaveOffsets(seed: seed)
         let weights = LookConstants.grainOctaveWeights + [0, 0, 0]
         return LookParams(
             shaperMax: LookConstants.shaperMaxLinear,
             shaperInvExp: 1 / LookConstants.shaperExponent,
-            lutSize: Float(LookConstants.lutSize),
+            lutSize: Float(max(lutSize, 2)),
             grainAmplitude: grainAmplitude,
             grainScale: grainScale,
             origin: origin,
@@ -47,7 +47,8 @@ final class LookResources: @unchecked Sendable {
     private let logger = Logger(subsystem: "ManualCameraApp", category: "Look")
     private var loaded = false
     private(set) var device: MTLDevice?
-    private(set) var lut: MTLTexture?
+    /// LUT textures by `LookDescriptor.id`, loaded on first use.
+    private var luts: [String: MTLTexture] = [:]
     private(set) var noise: MTLTexture?
     private(set) var stillPipeline: MTLComputePipelineState?
     private(set) var previewPipeline: MTLComputePipelineState?
@@ -55,7 +56,46 @@ final class LookResources: @unchecked Sendable {
     var isReady: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return loaded && lut != nil && noise != nil && stillPipeline != nil
+        return loaded && luts[LookDescriptor.defaultID] != nil && noise != nil && stillPipeline != nil
+    }
+
+    /// The LUT for a look. With `loadIfNeeded` false it never parses (safe on the video queue) and
+    /// returns nil until `preload` has run; callers then fall back to the base look.
+    func lut(for id: String, loadIfNeeded: Bool = true) -> MTLTexture? {
+        lock.lock()
+        if let texture = luts[id] {
+            lock.unlock()
+            return texture
+        }
+        let device = self.device
+        lock.unlock()
+        guard loadIfNeeded, let device else { return nil }
+        let descriptor = LookDescriptor.find(id)
+        guard let texture = Self.loadLUT(descriptor, device: device, logger: logger) else { return nil }
+        lock.lock()
+        luts[descriptor.id] = texture
+        lock.unlock()
+        return texture
+    }
+
+    /// Loads a look's LUT ahead of use (call off the main thread).
+    @discardableResult
+    func preload(_ id: String) -> Bool {
+        lut(for: id) != nil
+    }
+
+    private static func loadLUT(_ descriptor: LookDescriptor, device: MTLDevice, logger: Logger) -> MTLTexture? {
+        guard let url = Bundle.main.url(forResource: descriptor.resource, withExtension: "cube") else {
+            logger.error("\(descriptor.resource, privacy: .public).cube missing from the bundle")
+            return nil
+        }
+        do {
+            let table = try CubeLUT.parse(String(contentsOf: url, encoding: .utf8))
+            return makeLUTTexture(table, device: device)
+        } catch {
+            logger.error("Look \(descriptor.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     /// Loads everything (idempotent). Call from a background queue.
@@ -63,17 +103,14 @@ final class LookResources: @unchecked Sendable {
     func load(device: MTLDevice? = MTLCreateSystemDefaultDevice()) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        if loaded { return lut != nil }
+        if loaded { return luts[LookDescriptor.defaultID] != nil }
         loaded = true
         guard let device else { return false }
         self.device = device
         do {
-            guard let cubeURL = Bundle.main.url(forResource: "MFNaturalColour", withExtension: "cube") else {
-                logger.error("MFNaturalColour.cube missing from the bundle")
-                return false
+            if let base = Self.loadLUT(LookDescriptor.find(LookDescriptor.defaultID), device: device, logger: logger) {
+                luts[LookDescriptor.defaultID] = base
             }
-            let table = try CubeLUT.parse(String(contentsOf: cubeURL, encoding: .utf8))
-            lut = Self.makeLUTTexture(table, device: device)
             if let noiseURL = Bundle.main.url(forResource: "BlueNoise64", withExtension: "png") {
                 noise = Self.makeNoiseTexture(url: noiseURL, device: device)
             }
@@ -89,7 +126,7 @@ final class LookResources: @unchecked Sendable {
         } catch {
             logger.error("Look resources failed: \(error.localizedDescription, privacy: .public)")
         }
-        return lut != nil
+        return luts[LookDescriptor.defaultID] != nil
     }
 
     /// 65³ RGBA half-float 3D texture, red along x.

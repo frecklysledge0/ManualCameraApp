@@ -38,6 +38,10 @@ final class CameraSettings {
     /// What the user wants to save (Fn › Format).
     var captureFormat: CaptureFormat = .raw
     var rawSuppressedForStorage = false
+    /// HEIF resolution (RAW is always full resolution).
+    var photoSize: PhotoSize = .mp24
+    /// S/M: 12 MP with the exact exposure instead of 24/48 MP.
+    var exactManualExposure = false
 
     // MARK: Overlays and feedback
     var overlays = OverlaySettings()
@@ -49,6 +53,8 @@ final class CameraSettings {
     var grain: GrainLevel = .fine
     var shutterSound: ShutterSoundVolume = .low
     var previewGrain = false
+    /// `LookDescriptor.id` of the Edition's look.
+    var lookID = LookDescriptor.defaultID
     /// Debug-only performance read-out (feed fps, UI fps, shutter lag).
     var showPerformanceHUD = false
 
@@ -119,6 +125,9 @@ final class CameraSettings {
         grain = profile.grain
         shutterSound = profile.shutterSound
         previewGrain = profile.previewGrain
+        photoSize = profile.photoSize
+        exactManualExposure = profile.exactManualExposure
+        lookID = LookDescriptor.find(profile.lookID).id
     }
 
     /// Writes the current state into `profile` (keeps other modes' values).
@@ -136,6 +145,9 @@ final class CameraSettings {
         profile.grain = grain
         profile.shutterSound = shutterSound
         profile.previewGrain = previewGrain
+        profile.photoSize = photoSize
+        profile.exactManualExposure = exactManualExposure
+        profile.lookID = lookID
         if let lens, !lens.isFront { profile.lensKind = lens.kind }
     }
 }

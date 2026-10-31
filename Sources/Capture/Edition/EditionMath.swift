@@ -52,6 +52,22 @@ enum ShutterSoundVolume: String, Codable, CaseIterable, Sendable {
     }
 }
 
+/// One of the Edition's looks (generated into `LookConstants.looks` by tools/look/make_look.py).
+struct LookDescriptor: Equatable, Sendable {
+    var id: String
+    var name: String
+    /// `.cube` resource name in the bundle.
+    var resource: String
+    var lutSize: Int
+
+    static let defaultID = "natural"
+
+    /// The look with `id`, or the base look when it is unknown (for example, removed later).
+    static func find(_ id: String) -> LookDescriptor {
+        LookConstants.looks.first { $0.id == id } ?? LookConstants.looks[0]
+    }
+}
+
 /// Pure framing maths, shared by the preview mattes and the developed output.
 enum FramingMath {
 

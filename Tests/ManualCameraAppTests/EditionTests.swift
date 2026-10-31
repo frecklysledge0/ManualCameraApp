@@ -134,6 +134,22 @@ final class EditionTests: XCTestCase {
         }
     }
 
+    func testEveryLookIsBundledAndCurrent() throws {
+        XCTAssertEqual(LookConstants.looks.first?.id, LookDescriptor.defaultID)
+        XCTAssertEqual(Set(LookConstants.looks.map(\.id)).count, LookConstants.looks.count, "look ids must be unique")
+        for look in LookConstants.looks {
+            let url = try XCTUnwrap(Bundle.main.url(forResource: look.resource, withExtension: "cube"), "\(look.resource).cube is not in the app bundle")
+            let table = try CubeLUT.parse(String(contentsOf: url, encoding: .utf8))
+            XCTAssertEqual(table.size, look.lutSize, look.id)
+            XCTAssertEqual(table.sourceHash, LookConstants.sourceHash, "\(look.id): re-run tools/look/make_look.py")
+        }
+    }
+
+    func testUnknownLookFallsBackToTheBaseLook() {
+        XCTAssertEqual(LookDescriptor.find("no-such-look").id, LookDescriptor.defaultID)
+        XCTAssertEqual(LookDescriptor.find("mono").name, "Mono")
+    }
+
     func testBundledLookJSONMatchesTheGeneratedConstants() throws {
         let url = try XCTUnwrap(Bundle.main.url(forResource: "look", withExtension: "json"), "look.json is not in the app bundle")
         let digest = SHA256.hash(data: try Data(contentsOf: url))
@@ -236,12 +252,18 @@ final class EditionTests: XCTestCase {
         profile.grain = .medium
         profile.shutterSound = .off
         profile.previewGrain = true
+        profile.photoSize = .mp48
+        profile.exactManualExposure = true
+        profile.lookID = "cinematic"
         let decoded = try JSONDecoder().decode(ShootingProfile.self, from: JSONEncoder().encode(profile))
         XCTAssertEqual(decoded.theme, .edition)
         XCTAssertEqual(decoded.framing, .xpan)
         XCTAssertEqual(decoded.grain, .medium)
         XCTAssertEqual(decoded.shutterSound, .off)
         XCTAssertTrue(decoded.previewGrain)
+        XCTAssertEqual(decoded.photoSize, .mp48)
+        XCTAssertTrue(decoded.exactManualExposure)
+        XCTAssertEqual(decoded.lookID, "cinematic")
     }
 
     func testOlderProfilesGetEditionDefaults() throws {
@@ -251,6 +273,9 @@ final class EditionTests: XCTestCase {
         XCTAssertEqual(decoded.grain, .fine)
         XCTAssertEqual(decoded.shutterSound, .low)
         XCTAssertFalse(decoded.previewGrain)
+        XCTAssertEqual(decoded.photoSize, .mp24)
+        XCTAssertFalse(decoded.exactManualExposure)
+        XCTAssertEqual(decoded.lookID, LookDescriptor.defaultID)
     }
 
     func testShutterSoundGain() {

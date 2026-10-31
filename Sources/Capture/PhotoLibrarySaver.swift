@@ -3,8 +3,9 @@ import ImageIO
 import Photos
 import UIKit
 
-/// Saves a `CaptureItem` as **one** Photos asset (F4). The DNG is moved, not copied, into the
-/// library. When Photos add access is denied the files go to the app's Documents folder (§11).
+/// Saves a `CaptureItem` to Photos. RAW+HEIF becomes **two separate photos** (the HEIF and the
+/// DNG), so each can be edited, shared or deleted on its own. The DNG is moved, not copied, into
+/// the library. When Photos add access is denied the files go to the app's Documents folder (§11).
 final class PhotoLibrarySaver: PhotoLibrarySaving {
 
   private let store: CaptureFileStoring
@@ -34,28 +35,19 @@ final class PhotoLibrarySaver: PhotoLibrarySaving {
     let rawURL = item.rawFileURL
     PHPhotoLibrary.shared().performChanges(
       {
-        let request = PHAssetCreationRequest.forAsset()
-        // PhotoKit's rules: the `.photo` resource is what Photos displays. A RAW-only shot
-        // therefore uses the DNG as `.photo` (it then shows as a RAW / ProRAW photo, exactly like
-        // Apple's Camera). A RAW+HEIF pair uses the HEIF as `.photo` and the DNG as
-        // `.alternatePhoto` — the documented RAW+JPEG/HEIF pairing.
-        let rawOptions = PHAssetResourceCreationOptions()
-        rawOptions.shouldMoveFile = true
-        rawOptions.uniformTypeIdentifier = "com.adobe.raw-image"
-        switch (processedData, rawURL) {
-        case (.some(let data), .some(let url)):
+        // Each file is its own asset with itself as the `.photo` resource, so a DNG shows in
+        // Photos as a RAW / ProRAW photo, exactly like Apple's Camera, and a HEIF as a HEIF.
+        // Both requests run in one change block: either both photos are saved or neither.
+        if let data = processedData {
           let options = PHAssetResourceCreationOptions()
           options.uniformTypeIdentifier = processedType
-          request.addResource(with: .photo, data: data, options: options)
-          request.addResource(with: .alternatePhoto, fileURL: url, options: rawOptions)
-        case (.none, .some(let url)):
-          request.addResource(with: .photo, fileURL: url, options: rawOptions)
-        case (.some(let data), .none):
-          let options = PHAssetResourceCreationOptions()
-          options.uniformTypeIdentifier = processedType
-          request.addResource(with: .photo, data: data, options: options)
-        case (.none, .none):
-          break
+          PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: options)
+        }
+        if let url = rawURL {
+          let rawOptions = PHAssetResourceCreationOptions()
+          rawOptions.shouldMoveFile = true
+          rawOptions.uniformTypeIdentifier = "com.adobe.raw-image"
+          PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: url, options: rawOptions)
         }
       },
       completionHandler: { success, error in

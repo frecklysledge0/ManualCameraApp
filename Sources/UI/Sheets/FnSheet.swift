@@ -13,6 +13,9 @@ struct FnSheet: View {
                 Section {
                     Toggle(Branding.editionName, isOn: Binding(get: { settings.isEdition }, set: { controller.setEdition($0) }))
                     if settings.isEdition {
+                        Picker("Look", selection: Binding(get: { settings.lookID }, set: { controller.setLook($0) })) {
+                            ForEach(LookConstants.looks, id: \.id) { Text($0.name).tag($0.id) }
+                        }
                         Picker("Framing", selection: Binding(get: { settings.framing }, set: { controller.setFraming($0) })) {
                             ForEach(FramingMode.allCases, id: \.self) { Text($0.label).tag($0) }
                         }
@@ -86,12 +89,17 @@ struct FnSheet: View {
                     Toggle("Horizon line in viewfinder", isOn: Binding(get: { overlays.levelLine }, set: { value in controller.updateOverlays { $0.levelLine = value } }))
                 }
 
-                Section("Capture") {
+                Section {
                     Picker("Format", selection: Binding(get: { settings.captureFormat }, set: { controller.setCaptureFormat($0) })) {
                         ForEach(CaptureFormat.allCases, id: \.self) { Text($0.label).tag($0) }
                     }
                     .pickerStyle(.segmented)
                     .disabled(!settings.rawSupported)
+                    Picker("HEIF size", selection: Binding(get: { settings.photoSize }, set: { controller.setPhotoSize($0) })) {
+                        ForEach(PhotoSize.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("Exact manual exposure (12 MP)", isOn: Binding(get: { settings.exactManualExposure }, set: { controller.setExactManualExposure($0) }))
                     if !settings.rawSupported {
                         Text("This lens has no RAW format; photos are saved as HEIF.")
                             .font(.footnote)
@@ -102,6 +110,10 @@ struct FnSheet: View {
                             .font(.footnote)
                             .foregroundColor(theme.warning)
                     }
+                } header: {
+                    Text("Capture")
+                } footer: {
+                    Text("RAW is always full resolution (48 MP ProRAW where the phone supports it). RAW+HEIF saves two separate photos. iOS takes 24 and 48 MP photos only in its quality modes, which may fine-tune a manual exposure; turn on Exact manual exposure to keep S/M values exact at 12 MP.")
                 }
 
                 Section("Haptics") {

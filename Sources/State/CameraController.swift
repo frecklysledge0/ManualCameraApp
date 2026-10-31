@@ -206,6 +206,7 @@ final class CameraController {
             status.show(Banner(kind: .noCamera, message: "No camera found on this device.", action: .none))
             return
         }
+        engine.setResolution(heifSize: settings.photoSize, exactManualExposure: settings.exactManualExposure)
         engine.start(lens: settings.lens, format: settings.captureFormat)
         updateMotionSampling()
         checkPhotosAccess(request: true)
@@ -538,16 +539,7 @@ final class CameraController {
             halfPress()
         case .released:
             if settings.focusMode == .single && awaitingFocusLock {
-                shotWaitingForFocus = true
-                focusPriorityWorkItem?.cancel()
-                let item = DispatchWorkItem { [weak self] in
-                    guard let self else { return }
-                    MainActor.assumeIsolated {
-                        if self.shotWaitingForFocus { self.takeShotWaitingForFocus() }
-                    }
-                }
-                focusPriorityWorkItem = item
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: item)
+                waitForFocusThenShoot(timeout: 0.6)
             } else {
                 shutterPressed()
             }
@@ -585,44 +577,58 @@ final class CameraController {
         }
     }
 
-    /// Builds the Camera Control overlay's controls for the current lens: Aperture (every
-    /// accepted 1/3 stop, on lenses with a moving iris), Exposure and Focus. Rebuilt only when
-    /// the lens's stops change.
+    /// Builds the Camera Control overlay's controls for the current lens (Shutter, ISO, Aperture on
+    /// lenses with a moving iris, Exposure, Focus, Lens). Rebuilt only when their stops change.
     private func updateCameraControls() {
         guard #available(iOS 18.0, *) else { return }
-        let apertureStops = settings.capability.hasVariableAperture ? settings.apertureStops : []
-        let evStops = settings.evStops
-        if let existing = cameraControls as? CameraControlSet,
-           existing.apertureStops == apertureStops, existing.evStops == evStops {
+        let lenses = settings.backLenses
+        let content = CameraControlSet.Content(
+            shutterStops: settings.shutterStops,
+            isoStops: settings.isoStops,
+            apertureStops: settings.capability.hasVariableAperture ? settings.apertureStops : [],
+            evStops: settings.evStops,
+            lensTitles: lenses.map { $0.buttonText + "×" }
+        )
+        if let existing = cameraControls as? CameraControlSet, existing.content == content {
             syncCameraControls()
             return
         }
-        let set = CameraControlSet(
-            apertureStops: apertureStops,
-            evStops: evStops,
-            onAperture: { [weak self] value in self?.setAperture(value) },
-            onExposure: { [weak self] value in self?.setBias(value) },
-            onFocus: { [weak self] value in self?.setLensPositionFromCameraControl(value) }
-        )
+        let set = CameraControlSet(content: content, actions: CameraControlSet.Actions(
+            shutter: { [weak self] index in
+                guard let self, content.shutterStops.indices.contains(index) else { return }
+                self.setShutter(content.shutterStops[index])
+            },
+            iso: { [weak self] index in
+                guard let self, content.isoStops.indices.contains(index) else { return }
+                self.setISO(content.isoStops[index])
+            },
+            aperture: { [weak self] index in
+                guard let self, content.apertureStops.indices.contains(index) else { return }
+                self.setAperture(content.apertureStops[index])
+            },
+            exposure: { [weak self] value in self?.setBias(value) },
+            focus: { [weak self] value in self?.setLensPositionFromCameraControl(value) },
+            lens: { [weak self] index in
+                guard let self, lenses.indices.contains(index) else { return }
+                self.switchLens(lenses[index])
+            }
+        ))
         cameraControls = set
-        set.sync(aperture: currentAperture, bias: settings.exposure.bias, lensPosition: currentLensPosition)
+        syncCameraControls()
         engine.setCameraControls(set.controls) { [weak self] active in
             guard let self else { return }
             MainActor.assumeIsolated { self.cameraControlsChanged(active: active) }
         }
     }
 
-    private var currentAperture: Float {
-        settings.isAutomatic(.aperture) && telemetry.liveAperture > 0 ? telemetry.liveAperture : settings.exposure.aperture
-    }
-
-    private var currentLensPosition: Float {
-        settings.focusMode == .manual ? settings.lensPosition : telemetry.liveLensPosition
-    }
-
     private func syncCameraControls() {
         guard #available(iOS 18.0, *), let set = cameraControls as? CameraControlSet else { return }
-        set.sync(aperture: currentAperture, bias: settings.exposure.bias, lensPosition: currentLensPosition)
+        let shutter = settings.isAutomatic(.shutter) && telemetry.liveShutter > 0 ? telemetry.liveShutter : settings.exposure.shutter
+        let iso = settings.isAutomatic(.iso) && telemetry.liveISO > 0 ? telemetry.liveISO : settings.exposure.iso
+        let aperture = settings.isAutomatic(.aperture) && telemetry.liveAperture > 0 ? telemetry.liveAperture : settings.exposure.aperture
+        let lensPosition = settings.focusMode == .manual ? settings.lensPosition : telemetry.liveLensPosition
+        let lensIndex = settings.lens.flatMap { lens in settings.backLenses.firstIndex(of: lens) }
+        set.sync(shutter: shutter, iso: iso, aperture: aperture, bias: settings.exposure.bias, lensPosition: lensPosition, lensIndex: lensIndex)
     }
 
     /// A light press opened the overlay: show the current values and focus (the half-press).
@@ -644,7 +650,7 @@ final class CameraController {
     private func takeShotWaitingForFocus() {
         shotWaitingForFocus = false
         focusPriorityWorkItem?.cancel()
-        shutterPressed()
+        takePhoto()
     }
 
     private func scheduleFocusState(_ state: FocusFrameState, after delay: TimeInterval, onlyIf current: FocusFrameState) {
@@ -916,6 +922,45 @@ final class CameraController {
         scheduleSave()
     }
 
+    /// The Edition's look. Its LUT loads off the main thread; the viewfinder switches once it is ready.
+    func setLook(_ id: String) {
+        let look = LookDescriptor.find(id)
+        guard look.id != settings.lookID else { return }
+        settings.lookID = look.id
+        haptics.play(.detent)
+        loadLookThenShow(look.id)
+        scheduleSave()
+    }
+
+    /// Next look (tap on the look name in the strip).
+    func cycleLook() {
+        let looks = LookConstants.looks
+        let index = looks.firstIndex { $0.id == settings.lookID } ?? 0
+        setLook(looks[(index + 1) % looks.count].id)
+    }
+
+    private func loadLookThenShow(_ id: String) {
+        let renderer = editionRenderer
+        DispatchQueue.global(qos: .userInitiated).async {
+            LookResources.shared.preload(id)
+            renderer?.setLook(id)
+        }
+    }
+
+    // MARK: - Resolution
+
+    func setPhotoSize(_ size: PhotoSize) {
+        settings.photoSize = size
+        engine.setResolution(heifSize: size, exactManualExposure: settings.exactManualExposure)
+        scheduleSave()
+    }
+
+    func setExactManualExposure(_ exact: Bool) {
+        settings.exactManualExposure = exact
+        engine.setResolution(heifSize: settings.photoSize, exactManualExposure: exact)
+        scheduleSave()
+    }
+
     func setShowPerformanceHUD(_ show: Bool) {
         settings.showPerformanceHUD = show
     }
@@ -937,8 +982,11 @@ final class CameraController {
         let generation = editionGeneration
         let volume = settings.shutterSound
         let player = shutterSound
+        let lookID = settings.lookID
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let ready = LookResources.shared.load()
+            LookResources.shared.preload(lookID)
+            renderer.setLook(lookID)
             player.prepare(volume: volume)
             guard let self else { return }
             runOnMain { self.editionResourcesLoaded(ready: ready, generation: generation, animated: animated) }
@@ -984,7 +1032,35 @@ final class CameraController {
 
     // MARK: - Capture
 
+    /// The shutter (on-screen button or a hardware release). If autofocus is still moving the
+    /// lens, the photo waits for it to settle (at most 0.5 s), so shots are never taken mid-focus.
     func shutterPressed() {
+        guard status.canCapture else {
+            haptics.play(.limit)
+            return
+        }
+        if settings.focusMode != .manual && (telemetry.isAdjustingFocus || awaitingFocusLock) {
+            waitForFocusThenShoot(timeout: 0.5)
+            return
+        }
+        takePhoto()
+    }
+
+    private func waitForFocusThenShoot(timeout: TimeInterval) {
+        guard !shotWaitingForFocus else { return }
+        shotWaitingForFocus = true
+        focusPriorityWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                if self.shotWaitingForFocus { self.takeShotWaitingForFocus() }
+            }
+        }
+        focusPriorityWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: item)
+    }
+
+    private func takePhoto() {
         guard status.canCapture else {
             haptics.play(.limit)
             return
@@ -1006,7 +1082,9 @@ final class CameraController {
         let options = EditionDeveloper.Options(
             framing: settings.framing,
             grain: settings.grain,
-            iso: telemetry.liveISO > 0 ? telemetry.liveISO : settings.exposure.iso
+            iso: telemetry.liveISO > 0 ? telemetry.liveISO : settings.exposure.iso,
+            lookID: settings.lookID,
+            maxPixels: settings.photoSize.pixels
         )
         engine.capture(CaptureEngine.CaptureRequest(
             format: settings.effectiveFormat,
@@ -1120,6 +1198,7 @@ final class CameraController {
                 }
             } else {
                 continuousFocusChanged(adjusting: adjusting)
+                if !adjusting && shotWaitingForFocus { takeShotWaitingForFocus() }
             }
 
         case .readiness(let ready):

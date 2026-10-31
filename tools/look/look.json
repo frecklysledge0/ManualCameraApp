@@ -1,6 +1,7 @@
 {
+  "id": "natural",
   "name": "MF Natural Colour",
-  "version": 1,
+  "version": 2,
   "notes": "Original medium-format-inspired look. Every number that shapes the look lives here; make_look.py turns it into the 3D LUT and the Swift constants, so the live preview and the developed still use identical values.",
   "develop": {
     "sharpnessAmount": 0.0,
@@ -16,14 +17,34 @@
   "lutSize": 65,
   "colour": {
     "saturation": 0.95,
-    "reds":   { "centerHue": 29,  "width": 34, "hueShift": 5.0,  "chroma": 1.0 },
-    "greens": { "centerHue": 142, "width": 46, "hueShift": -7.0, "chroma": 0.88 },
-    "blues":  { "centerHue": 262, "width": 44, "hueShift": -6.0, "chroma": 0.94 }
+    "reds": {
+      "centerHue": 29,
+      "width": 34,
+      "hueShift": 5.0,
+      "chroma": 1.0
+    },
+    "greens": {
+      "centerHue": 142,
+      "width": 46,
+      "hueShift": -7.0,
+      "chroma": 0.88
+    },
+    "blues": {
+      "centerHue": 262,
+      "width": 44,
+      "hueShift": -6.0,
+      "chroma": 0.94
+    }
   },
   "skin": {
-    "bandStart": 20, "bandEnd": 60, "targetHue": 45, "pull": 0.35,
-    "chromaKnee": 0.11, "chromaCompression": 0.5,
-    "lightnessMin": 0.35, "lightnessMax": 0.92,
+    "bandStart": 20,
+    "bandEnd": 60,
+    "targetHue": 45,
+    "pull": 0.35,
+    "chromaKnee": 0.11,
+    "chromaCompression": 0.5,
+    "lightnessMin": 0.35,
+    "lightnessMax": 0.92,
     "magentaGuard": 0.6
   },
   "tone": {
@@ -35,12 +56,177 @@
     "highlightDesaturation": 0.55
   },
   "grain": {
-    "fine":   { "amplitude": 0.020, "size": 1.0 },
-    "medium": { "amplitude": 0.034, "size": 1.35 },
+    "fine": {
+      "amplitude": 0.02,
+      "size": 1.0
+    },
+    "medium": {
+      "amplitude": 0.034,
+      "size": 1.35
+    },
     "referenceHeight": 4000,
-    "octaveWeights": [0.6, 0.3, 0.1],
+    "octaveWeights": [
+      0.6,
+      0.3,
+      0.1
+    ],
     "isoBoostPerStop": 0.12,
     "isoBoostMax": 1.6,
     "previewAmplitudeScale": 0.5
-  }
+  },
+  "looks": [
+    {
+      "id": "warm",
+      "name": "Warm Portrait",
+      "lutSize": 33,
+      "notes": "Soft contrast, warm cast, gentle greens; flattering skin.",
+      "overrides": {
+        "whiteBalance": {
+          "red": 1.035,
+          "blue": 0.955
+        },
+        "colour": {
+          "saturation": 0.9,
+          "reds": {
+            "chroma": 0.95
+          },
+          "greens": {
+            "hueShift": -10.0,
+            "chroma": 0.8
+          },
+          "blues": {
+            "chroma": 0.86
+          }
+        },
+        "skin": {
+          "pull": 0.45
+        },
+        "tone": {
+          "toe": 0.006,
+          "midContrast": 0.97,
+          "shoulderStart": 0.38
+        }
+      }
+    },
+    {
+      "id": "classic",
+      "name": "Classic Muted",
+      "lutSize": 33,
+      "notes": "Muted colour, deep reds, cyan-leaning blues, firm shadows.",
+      "overrides": {
+        "colour": {
+          "saturation": 0.78,
+          "reds": {
+            "hueShift": -3.0,
+            "chroma": 1.06
+          },
+          "greens": {
+            "hueShift": 6.0,
+            "chroma": 0.7
+          },
+          "blues": {
+            "hueShift": -12.0,
+            "chroma": 0.85
+          }
+        },
+        "tone": {
+          "toe": 0.008,
+          "midContrast": 1.12,
+          "highlightDesaturation": 0.65
+        }
+      }
+    },
+    {
+      "id": "cinematic",
+      "name": "Cinematic",
+      "lutSize": 33,
+      "notes": "Teal shadows, warm highlights, restrained greens.",
+      "overrides": {
+        "colour": {
+          "saturation": 0.9,
+          "greens": {
+            "hueShift": 12.0,
+            "chroma": 0.75
+          }
+        },
+        "tone": {
+          "midContrast": 1.08
+        },
+        "splitTone": {
+          "shadowHue": 200,
+          "shadowStrength": 0.025,
+          "highlightHue": 65,
+          "highlightStrength": 0.018,
+          "balance": 0.5
+        }
+      }
+    },
+    {
+      "id": "faded",
+      "name": "Faded Film",
+      "lutSize": 33,
+      "notes": "Lifted blacks, low contrast, cool-green shadows and warm highlights.",
+      "overrides": {
+        "whiteBalance": {
+          "red": 1.01
+        },
+        "colour": {
+          "saturation": 0.85
+        },
+        "tone": {
+          "midContrast": 0.95
+        },
+        "splitTone": {
+          "shadowHue": 175,
+          "shadowStrength": 0.012,
+          "highlightHue": 70,
+          "highlightStrength": 0.012,
+          "balance": 0.55
+        },
+        "fade": {
+          "black": 0.025,
+          "white": 0.97
+        }
+      }
+    },
+    {
+      "id": "mono",
+      "name": "Mono",
+      "lutSize": 33,
+      "notes": "Black and white through a yellow filter: natural skies, smooth skin.",
+      "overrides": {
+        "monochrome": {
+          "mix": [
+            0.35,
+            0.5,
+            0.15
+          ]
+        },
+        "tone": {
+          "midContrast": 1.12,
+          "highlightDesaturation": 0.0
+        }
+      }
+    },
+    {
+      "id": "mono-red",
+      "name": "Mono Red Filter",
+      "lutSize": 33,
+      "notes": "High-contrast black and white through a red filter: dark skies, bright skin.",
+      "overrides": {
+        "monochrome": {
+          "mix": [
+            0.62,
+            0.33,
+            0.05
+          ]
+        },
+        "tone": {
+          "midContrast": 1.24,
+          "toe": 0.006,
+          "highlightDesaturation": 0.0
+        }
+      }
+    }
+  ]
 }

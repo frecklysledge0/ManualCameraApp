@@ -145,16 +145,25 @@ private struct EditionReadoutStrip: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Framing \(settings.framing.label)")
         .accessibilityHint("Double-tap to change the framing.")
-        ThemeLabel(settings.effectiveFormat.label)
+        Button {
+          controller.cycleLook()
+        } label: {
+          ThemeLabel(LookDescriptor.find(settings.lookID).name, color: theme.text)
+            .lineLimit(1)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Look \(LookDescriptor.find(settings.lookID).name)")
+        .accessibilityHint("Double-tap for the next look.")
         Spacer(minLength: 6)
         HistogramView(telemetry: telemetry, mode: .luma, showsFrame: false)
-          .frame(width: 64, height: 16)
+          .frame(width: 52, height: 16)
           .contentShape(Rectangle())
           .onTapGesture { controller.toggleHistogramExpanded() }
-        Spacer(minLength: 6)
         if settings.overlays.levelEnabled {
           HairlineLevel(telemetry: telemetry)
-            .frame(width: 56, height: 16)
+            .frame(width: 36, height: 16)
         }
         ThemeLabel(Readouts.shotsLeft(telemetry))
           .monospacedDigit()

@@ -73,6 +73,12 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
     private var didRetryAfterError = false
     /// The format prepared first (the one the user shoots).
     private var preparedFormat: CaptureFormat = .raw
+    /// The active format's `supportedMaxPhotoDimensions`.
+    private var supportedPhotoDimensions: [(width: Int32, height: Int32)] = []
+    /// HEIF resolution (RAW is always full resolution).
+    private var heifSize: PhotoSize = .mp24
+    /// S/M: 12 MP with the exact exposure instead of 24/48 MP with iOS fine-tuning it.
+    private var exactManualExposure = false
     /// Shots captured but not yet saved (the Edition holds the shutter at 3, Slice 3 §6).
     private var developingCount = 0
     private var frameRateCap: Double = 60
@@ -271,6 +277,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
     /// Photo output setup for the active format (§7). Must run inside begin/commitConfiguration.
     private func configurePhotoOutput(for device: AVCaptureDevice) {
         let dimensions = device.activeFormat.supportedMaxPhotoDimensions
+        supportedPhotoDimensions = dimensions.map { (width: $0.width, height: $0.height) }
         if let largest = dimensions.max(by: { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) }) {
             photoOutput.maxPhotoDimensions = largest
         }
@@ -485,6 +492,17 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
 
     // MARK: - RAW and thermal
 
+    /// HEIF size and the exact-manual-exposure choice; re-prepares the photo settings.
+    func setResolution(heifSize: PhotoSize, exactManualExposure: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            guard self.heifSize != heifSize || self.exactManualExposure != exactManualExposure else { return }
+            self.heifSize = heifSize
+            self.exactManualExposure = exactManualExposure
+            if self.isConfigured { self.preparePhotoSettings() }
+        }
+    }
+
     /// Re-prepares the photo settings for the format the user now shoots.
     func setCaptureFormat(_ format: CaptureFormat) {
         sessionQueue.async { [weak self] in
@@ -548,18 +566,36 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
             format = .heif
             settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: codec])
         }
-        settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
-
-        // F6: locked manual exposure is only honoured with `.speed`.
-        var priority: AVCapturePhotoOutput.QualityPrioritization = customExposure ? .speed : .balanced
-        if format.includesRaw, AVCapturePhotoOutput.isBayerRAWPixelFormat(settings.rawPhotoPixelFormatType) {
-            // Bayer RAW is a single unfused frame.
-            priority = .speed
+        // Resolution and prioritization (WWDC26 304): RAW at full resolution (48 MP), HEIF at the
+        // chosen size (24 MP by default). See `PhotoResolution` for the rules.
+        let maxPriority: PhotoResolution.Prioritization
+        switch photoOutput.maxPhotoQualityPrioritization {
+        case .speed: maxPriority = .speed
+        case .balanced: maxPriority = .balanced
+        default: maxPriority = .quality
         }
-        if priority.rawValue > photoOutput.maxPhotoQualityPrioritization.rawValue {
-            priority = photoOutput.maxPhotoQualityPrioritization
+        let choice = PhotoResolution.choose(
+            supported: supportedPhotoDimensions,
+            format: format,
+            heifSize: heifSize,
+            customExposure: customExposure,
+            exactManualExposure: exactManualExposure,
+            bayerRaw: format.includesRaw && AVCapturePhotoOutput.isBayerRAWPixelFormat(settings.rawPhotoPixelFormatType),
+            maxPrioritization: maxPriority
+        )
+        let wanted = CMVideoDimensions(width: choice.width, height: choice.height)
+        let limit = photoOutput.maxPhotoDimensions
+        // Never ask for more than the output was configured for.
+        if Int(wanted.width) * Int(wanted.height) <= Int(limit.width) * Int(limit.height) || limit.width == 0 {
+            settings.maxPhotoDimensions = wanted
+        } else {
+            settings.maxPhotoDimensions = limit
         }
-        settings.photoQualityPrioritization = priority
+        switch choice.prioritization {
+        case .speed: settings.photoQualityPrioritization = .speed
+        case .balanced: settings.photoQualityPrioritization = .balanced
+        case .quality: settings.photoQualityPrioritization = .quality
+        }
         return (settings, format)
     }
 
@@ -645,6 +681,16 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
                 return developed
             }
         }
+        if request.develop == nil, actualFormat == .rawPlusHEIF {
+            // RAW+HEIF shares one capture size (full resolution, for the DNG); scale the HEIF to
+            // the chosen size afterwards on the develop queue.
+            let captured = Int(settings.maxPhotoDimensions.width) * Int(settings.maxPhotoDimensions.height)
+            let target = heifSize.pixels
+            if captured > target + target / 10 {
+                processor.developQueue = developQueue
+                processor.develop = { item in HEIFResizer.resize(item, maxPixels: target) }
+            }
+        }
         let rawThumbnail = ThumbnailBox()
         processor.onRawFileWritten = { url in
             rawThumbnail.image = ThumbnailMaker.thumbnail(fromFileURL: url)
@@ -674,6 +720,14 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
             }
         }
 
+        if let device = activeInput?.device {
+            logger.info("""
+            Capture \(actualFormat.label, privacy: .public) \(settings.maxPhotoDimensions.width)x\(settings.maxPhotoDimensions.height) \
+            prio=\(settings.photoQualityPrioritization.rawValue) focusMode=\(device.focusMode.rawValue) \
+            adjusting=\(device.isAdjustingFocus) lens=\(device.lensPosition, format: .fixed(precision: 3)) \
+            shutter=\(device.exposureDuration.seconds, format: .fixed(precision: 5)) iso=\(device.iso, format: .fixed(precision: 0))
+            """)
+        }
         let delegate = PhotoCaptureDelegate(processor: processor)
         delegate.onWillBeginCapture = request.onWillBeginCapture
         delegates[settings.uniqueID] = delegate

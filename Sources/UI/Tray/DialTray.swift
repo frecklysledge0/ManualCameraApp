@@ -104,15 +104,7 @@ private struct ApertureTray: View {
             let current = isAuto ? controller.telemetry.liveAperture : settings.exposure.aperture
             HStack(spacing: 8) {
                 DialView(
-                    // Thirds between full stops are minor ticks; the ends and full stops are labelled.
-                    stops: stops.enumerated().map { index, fNumber in
-                        let isEnd = index == 0 || index == stops.count - 1
-                        // A full stop right next to an end would collide with the end's label.
-                        let isLabelledFullStop = ExposureMath.isFullStop(aperture: fNumber) && index >= 2 && index <= stops.count - 3
-                        let major = isEnd || isLabelledFullStop
-                        let text = ExposureMath.formatAperture(fNumber)
-                        return DialStop(label: major ? text : nil, isMajor: major, spokenValue: text)
-                    },
+                    stops: stops.map { DialStop(label: ExposureMath.formatAperture($0), isMajor: true) },
                     selectedIndex: ExposureMath.nearestIndex(of: current, in: stops),
                     isAuto: isAuto,
                     accessibilityName: "Aperture",

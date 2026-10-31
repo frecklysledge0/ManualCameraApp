@@ -196,7 +196,7 @@ enum CaptureFormat: String, Codable, CaseIterable, Sendable {
     case heif
     /// Apple ProRAW (or Bayer RAW) DNG only — shows as a RAW / ProRAW photo in Photos.
     case raw
-    /// HEIF shown in Photos with the DNG attached as its RAW original (RAW+HEIF pair).
+    /// A HEIF and a DNG from the same shot, saved as two separate photos.
     case rawPlusHEIF
 
     var includesRaw: Bool { self != .heif }
@@ -208,5 +208,114 @@ enum CaptureFormat: String, Codable, CaseIterable, Sendable {
         case .raw: return "RAW"
         case .rawPlusHEIF: return "RAW+HEIF"
         }
+    }
+}
+
+/// Resolution of processed (HEIF) photos. RAW is always captured at the sensor's full resolution.
+enum PhotoSize: String, Codable, CaseIterable, Sendable {
+    case mp12
+    case mp24
+    case mp48
+
+    var label: String {
+        switch self {
+        case .mp12: return "12 MP"
+        case .mp24: return "24 MP"
+        case .mp48: return "48 MP"
+        }
+    }
+
+    /// Nominal pixel count (4032×3024, 5712×4284, 8064×6048).
+    var pixels: Int {
+        switch self {
+        case .mp12: return 4032 * 3024
+        case .mp24: return 5712 * 4284
+        case .mp48: return 8064 * 6048
+        }
+    }
+}
+
+/// Picks capture dimensions and quality prioritization from the format's supported sizes
+/// (WWDC26 "Implement high resolution photo capture"):
+/// - 12 MP works at every prioritization; 48 MP needs `.balanced` or `.quality`; the fused 24 MP
+///   needs `.quality`.
+/// - A locked (custom) exposure is honoured exactly only with `.speed`, which caps photos at 12 MP.
+///   By default the app keeps the resolution (24/48 MP) and lets iOS fine-tune a manual exposure;
+///   "Exact manual exposure" chooses 12 MP with the exact values instead.
+enum PhotoResolution {
+
+    struct Choice: Equatable {
+        var width: Int32
+        var height: Int32
+        var prioritization: Prioritization
+
+        var pixels: Int { Int(width) * Int(height) }
+    }
+
+    /// Mirrors `AVCapturePhotoOutput.QualityPrioritization` (testable without AVFoundation).
+    enum Prioritization: Int, Comparable, Sendable {
+        case speed = 1
+        case balanced = 2
+        case quality = 3
+
+        static func < (lhs: Prioritization, rhs: Prioritization) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
+
+    /// - Parameters:
+    ///   - supported: the active format's `supportedMaxPhotoDimensions` as (width, height).
+    ///   - format: what is captured. `.raw` and `.rawPlusHEIF` capture at full resolution
+    ///     (a RAW+HEIF's HEIF is scaled to `heifSize` afterwards).
+    ///   - bayerRaw: Bayer RAW is a single unfused frame at 12 MP.
+    ///   - maxPrioritization: the output's `maxPhotoQualityPrioritization`.
+    static func choose(
+        supported: [(width: Int32, height: Int32)],
+        format: CaptureFormat,
+        heifSize: PhotoSize,
+        customExposure: Bool,
+        exactManualExposure: Bool,
+        bayerRaw: Bool,
+        maxPrioritization: Prioritization
+    ) -> Choice {
+        let sizes = supported.sorted { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) }
+        guard let smallest = sizes.first, let largest = sizes.last else {
+            return Choice(width: 4032, height: 3024, prioritization: min(.balanced, maxPrioritization))
+        }
+        let twelve = sizes.last(where: { Int($0.width) * Int($0.height) <= PhotoSize.mp12.pixels + PhotoSize.mp12.pixels / 10 }) ?? smallest
+
+        if bayerRaw && format.includesRaw {
+            return Choice(width: twelve.width, height: twelve.height, prioritization: .speed)
+        }
+        if customExposure && exactManualExposure {
+            return Choice(width: twelve.width, height: twelve.height, prioritization: .speed)
+        }
+
+        let target: (width: Int32, height: Int32)
+        if format.includesRaw {
+            target = largest
+        } else {
+            // The largest supported size up to the wanted one, so 24 MP falls back to 12 MP on
+            // phones without the fused 24 MP size (never silently up to 48 MP files).
+            let wanted = heifSize.pixels + heifSize.pixels / 10
+            target = sizes.last(where: { Int($0.width) * Int($0.height) <= wanted }) ?? smallest
+        }
+        let pixels = Int(target.width) * Int(target.height)
+        let isTwelve = pixels <= Int(twelve.width) * Int(twelve.height)
+        let isFusedMid = !isTwelve && pixels < Int(largest.width) * Int(largest.height)
+        var prioritization: Prioritization
+        if isTwelve {
+            prioritization = customExposure ? .speed : .balanced
+        } else if isFusedMid {
+            prioritization = .quality
+        } else {
+            prioritization = format.includesRaw ? .balanced : .quality
+        }
+        if prioritization > maxPrioritization {
+            prioritization = maxPrioritization
+        }
+        // What the prioritization allows decides the size (48 MP needs ≥ balanced, 24 MP quality).
+        if prioritization == .speed || (isFusedMid && prioritization < .quality) {
+            return Choice(width: twelve.width, height: twelve.height, prioritization: prioritization)
+        }
+        return Choice(width: target.width, height: target.height, prioritization: prioritization)
     }
 }

@@ -18,6 +18,7 @@ final class EditionPreviewRenderer: @unchecked Sendable {
     private weak var layer: CAMetalLayer?
     private var grainAmplitude: Float = 0
     private var sourceIsP3 = true
+    private var lookID = LookDescriptor.defaultID
 
     init(layer: CAMetalLayer) {
         self.layer = layer
@@ -32,6 +33,13 @@ final class EditionPreviewRenderer: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// The look to show (its LUT should be preloaded; until then the base look is drawn).
+    func setLook(_ id: String) {
+        lock.lock()
+        lookID = id
+        lock.unlock()
+    }
+
     func setSourceIsP3(_ isP3: Bool) {
         lock.lock()
         sourceIsP3 = isP3
@@ -41,12 +49,15 @@ final class EditionPreviewRenderer: @unchecked Sendable {
     /// Encodes one frame. Called by `FramePipeline` on the video queue.
     func render(commandBuffer: MTLCommandBuffer, luma: MTLTexture, chroma: MTLTexture, quarterTurns: Int, mirrored: Bool) {
         let resources = LookResources.shared
-        guard let pipeline = resources.previewPipeline, let lut = resources.lut, let noise = resources.noise else { return }
         lock.lock()
         let target = layer
         let amplitude = grainAmplitude
         let isP3 = sourceIsP3
+        let currentLook = lookID
         lock.unlock()
+        guard let pipeline = resources.previewPipeline,
+              let lut = resources.lut(for: currentLook, loadIfNeeded: false) ?? resources.lut(for: LookDescriptor.defaultID, loadIfNeeded: false),
+              let noise = resources.noise else { return }
         guard let target, target.drawableSize.width > 0, target.drawableSize.height > 0,
               let drawable = target.nextDrawable(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -55,7 +66,8 @@ final class EditionPreviewRenderer: @unchecked Sendable {
         var look = LookParams.make(
             grainAmplitude: amplitude,
             grainScale: max(0.5, LookConstants.grainFineSize * Float(output.height) / LookConstants.grainReferenceHeight * 2),
-            seed: 1
+            seed: 1,
+            lutSize: lut.width
         )
         var params = PreviewParams(
             quarterTurns: UInt32(((quarterTurns % 4) + 4) % 4),
