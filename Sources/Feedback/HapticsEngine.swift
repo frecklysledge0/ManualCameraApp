@@ -1,13 +1,20 @@
 import CoreHaptics
 import UIKit
 
-/// Every haptic the app plays (§12). Patterns are (intensity, sharpness, time offset in seconds).
+/// Every haptic the app plays (Slice 1 §12, Slice 2 §10). Patterns are
+/// (intensity, sharpness, time offset in seconds).
 enum HapticEvent: CaseIterable, Hashable, Sendable {
     case shutterPress
     case saved
     case lensSwitch
     case detent
     case limit
+    case focusLock
+    case focusSnap
+    case level
+    case modeChange
+    /// Very light tick for the MF wheel (every 1/50 of travel).
+    case focusTick
 
     struct Transient: Sendable {
         let intensity: Float
@@ -27,6 +34,16 @@ enum HapticEvent: CaseIterable, Hashable, Sendable {
             return [Transient(intensity: 0.45, sharpness: 0.9, time: 0)]
         case .limit:
             return [Transient(intensity: 0.7, sharpness: 1.0, time: 0)]
+        case .focusLock:
+            return [Transient(intensity: 0.6, sharpness: 0.6, time: 0)]
+        case .focusSnap:
+            return [Transient(intensity: 0.5, sharpness: 1.0, time: 0), Transient(intensity: 0.5, sharpness: 1.0, time: 0.018)]
+        case .level:
+            return [Transient(intensity: 0.4, sharpness: 0.5, time: 0)]
+        case .modeChange:
+            return [Transient(intensity: 0.7, sharpness: 0.4, time: 0)]
+        case .focusTick:
+            return [Transient(intensity: 0.22, sharpness: 0.9, time: 0)]
         }
     }
 }

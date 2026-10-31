@@ -16,7 +16,12 @@ struct HistogramSample: Equatable, Sendable {
 
     static let empty = HistogramSample(red: [], green: [], blue: [], luma: [], shadowClip: 0, highlightClip: 0)
 
+    /// Clip markers light up above 0.5% of samples (Slice 2 §9).
+    static let clipMarkerFraction: Float = 0.005
+
     var isEmpty: Bool { red.isEmpty }
+    var clipsHighlights: Bool { highlightClip > Self.clipMarkerFraction }
+    var clipsShadows: Bool { shadowClip > Self.clipMarkerFraction }
 
     /// Largest absolute bin difference against another sample (used to skip identical publishes).
     func maxDifference(to other: HistogramSample) -> Float {
@@ -38,7 +43,8 @@ enum ThermalLevel: Int, Comparable, Sendable {
     static func < (lhs: ThermalLevel, rhs: ThermalLevel) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
-/// Swift mirror of `OverlayParams` in Shaders.metal.
+// MARK: - Swift mirrors of the Metal parameter structs (Shaders.metal)
+
 private struct OverlayParams {
     var quarterTurns: UInt32
     var mirrored: UInt32
@@ -46,25 +52,63 @@ private struct OverlayParams {
     var stepScale: Float
     var color: SIMD4<Float>
     var lumaTexel: SIMD2<Float>
-    var padding: SIMD2<Float> = .zero
+    var peakingEnabled: UInt32
+    var zebrasEnabled: UInt32
+    var zebraThreshold: Float
+    var time: Float
+    var flash: Float
+    var padding: Float = 0
 }
 
-/// Swift mirror of `HistogramParams` in Shaders.metal.
 private struct HistogramParams {
     var width: UInt32
     var height: UInt32
 }
 
-/// The `AVCaptureVideoDataOutput` delegate (§6.2). Everything runs on `videoQueue` and the GPU:
-/// no `UIImage`, no per-frame allocation, no main-thread hop for peaking. Histograms are published
-/// at most 30 times a second and only when they changed.
+private struct SharpnessParams {
+    var origin: SIMD2<Float>
+    var size: SIMD2<Float>
+    var gridWidth: UInt32
+    var gridHeight: UInt32
+    var lumaTexel: SIMD2<Float>
+}
+
+private struct LoupeParams {
+    var center: SIMD2<Float>
+    var windowSize: SIMD2<Float>
+    var quarterTurns: UInt32
+    var mirrored: UInt32
+    var nearest: UInt32
+    var threshold: Float
+    var peakColor: SIMD4<Float>
+    var lumaTexel: SIMD2<Float>
+    var peaking: UInt32
+    var padding: Float = 0
+}
+
+/// The `AVCaptureVideoDataOutput` delegate (Slice 1 §6.2, Slice 2 §8–9). Everything runs on
+/// `videoQueue` and the GPU: no `UIImage`, no per-frame allocation, no main-thread hop for drawing.
+/// Peaking and zebras share one overlay pass; the loupe and the sharpness metric read the
+/// native-resolution frame.
 final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate, @unchecked Sendable {
 
     struct Config: Equatable {
         var peakingEnabled = false
-        var histogramEnabled = true
-        var peakingColor = SIMD4<Float>(0.2, 1.0, 0.2, 0.9)
+        var peakingColor = SIMD4<Float>(1.0, 0.333, 0.0, 0.95)
         var peakingThreshold: Float = 0.22
+        var zebrasEnabled = false
+        var zebraThreshold: Float = 0.95
+        var histogramEnabled = true
+        /// Edge-energy metric for the focus snap; computed only while pulling focus.
+        var sharpnessEnabled = false
+        /// ROI in display uv (0…1), centred on the focus point.
+        var sharpnessROI = CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2)
+        var loupeEnabled = false
+        /// Loupe centre in display uv.
+        var loupeCenter = CGPoint(x: 0.5, y: 0.5)
+        /// Display-uv size of the region shown in the loupe.
+        var loupeWindow = CGSize(width: 0.1, height: 0.1)
+        var loupeNearest = false
         var quarterTurns = 1
         var mirrored = false
         var thermal: ThermalLevel = .nominal
@@ -80,20 +124,32 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     var onFirstFrame: (() -> Void)?
     /// Called once a second with the measured feed frame rate (debug HUD).
     var onFeedRate: ((Double) -> Void)?
+    /// Called on a background thread with the focus-ROI edge energy, once per frame while enabled.
+    var onSharpness: ((Double) -> Void)?
+    /// Called on `videoQueue` when the native buffer size changes (decides whether 8× loupe is real).
+    var onBufferSize: ((CGSize) -> Void)?
 
     private let commandQueue: MTLCommandQueue?
     private var textureCache: CVMetalTextureCache?
-    private var peakingPipeline: MTLComputePipelineState?
+    private var overlayPipeline: MTLComputePipelineState?
     private var histogramPipeline: MTLComputePipelineState?
+    private var sharpnessPipeline: MTLComputePipelineState?
+    private var loupePipeline: MTLComputePipelineState?
     private var histogramBuffers: [MTLBuffer] = []
     private var histogramBufferIndex = 0
     private let histogramSlots = DispatchSemaphore(value: 2)
     private let histogramGrid = (width: 256, height: 192)
+    private var sharpnessBuffers: [MTLBuffer] = []
+    private var sharpnessBufferIndex = 0
+    private let sharpnessSlots = DispatchSemaphore(value: 2)
+    private let sharpnessGrid = 128
 
     private let stateLock = NSLock()
     private var config = Config()
     private weak var overlayLayer: CAMetalLayer?
+    private weak var loupeLayer: CAMetalLayer?
     private var expectedDeviceID: String?
+    private var flashUntil: TimeInterval = 0
 
     // videoQueue-confined state
     private var frameIndex: UInt64 = 0
@@ -102,6 +158,12 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var lastHistogramTime: TimeInterval = 0
     private var rateWindowStart: TimeInterval = 0
     private var rateWindowFrames = 0
+    private var lastBufferSize = CGSize.zero
+    private let startTime = ProcessInfo.processInfo.systemUptime
+
+    /// Hook for the Slice 3 Metal preview renderer: called on `videoQueue` with each frame's
+    /// textures, inside the frame's command buffer.
+    var frameRenderer: ((MTLCommandBuffer, MTLTexture, MTLTexture) -> Void)?
 
     // GPU-completion state
     private let histogramLock = NSLock()
@@ -124,11 +186,14 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         textureCache = cache
 
         if let library = device.makeDefaultLibrary() {
-            peakingPipeline = Self.makePipeline(named: "peakingKernel", library: library, device: device)
+            overlayPipeline = Self.makePipeline(named: "overlayKernel", library: library, device: device)
             histogramPipeline = Self.makePipeline(named: "histogramKernel", library: library, device: device)
+            sharpnessPipeline = Self.makePipeline(named: "sharpnessKernel", library: library, device: device)
+            loupePipeline = Self.makePipeline(named: "loupeKernel", library: library, device: device)
         }
-        let length = 1024 * MemoryLayout<UInt32>.stride
-        histogramBuffers = (0..<2).compactMap { _ in device.makeBuffer(length: length, options: .storageModeShared) }
+        let histogramLength = 1024 * MemoryLayout<UInt32>.stride
+        histogramBuffers = (0..<2).compactMap { _ in device.makeBuffer(length: histogramLength, options: .storageModeShared) }
+        sharpnessBuffers = (0..<2).compactMap { _ in device.makeBuffer(length: MemoryLayout<UInt32>.stride, options: .storageModeShared) }
     }
 
     private static func makePipeline(named name: String, library: MTLLibrary, device: MTLDevice) -> MTLComputePipelineState? {
@@ -150,10 +215,23 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         return config
     }
 
-    /// The overlay layer peaking is drawn into. Configure it with `metalDevice` on the main thread first.
+    /// The overlay layer peaking and zebras are drawn into.
     func attachOverlay(_ layer: CAMetalLayer?) {
         stateLock.lock()
         overlayLayer = layer
+        stateLock.unlock()
+    }
+
+    func attachLoupe(_ layer: CAMetalLayer?) {
+        stateLock.lock()
+        loupeLayer = layer
+        stateLock.unlock()
+    }
+
+    /// Brightens peaking briefly (the focus-snap flash).
+    func flashPeaking(duration: TimeInterval = 0.2) {
+        stateLock.lock()
+        flashUntil = ProcessInfo.processInfo.systemUptime + duration
         stateLock.unlock()
     }
 
@@ -164,7 +242,7 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         stateLock.unlock()
     }
 
-    // MARK: - Snapshot for lens switches (§8)
+    // MARK: - Snapshot for lens switches (Slice 1 §8)
 
     /// Blurred, display-oriented copy of the latest frame. Calls back on `videoQueue`.
     func makeSnapshot(maxDimension: CGFloat = 480, completion: @escaping (CGImage?) -> Void) {
@@ -198,6 +276,13 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         }
     }
 
+    /// Converts a display-uv rect to the matching buffer-uv rect (rotation maps rects to rects).
+    static func bufferRect(forDisplayRect rect: CGRect, quarterTurns: Int, mirrored: Bool) -> CGRect {
+        let a = RotationMath.bufferPoint(forDisplayPoint: CGPoint(x: rect.minX, y: rect.minY), quarterTurns: quarterTurns, mirrored: mirrored)
+        let b = RotationMath.bufferPoint(forDisplayPoint: CGPoint(x: rect.maxX, y: rect.maxY), quarterTurns: quarterTurns, mirrored: mirrored)
+        return CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+    }
+
     // MARK: - Frames
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
@@ -207,9 +292,17 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let now = ProcessInfo.processInfo.systemUptime
         measureRate(now: now)
 
+        let bufferSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
+        if bufferSize != lastBufferSize {
+            lastBufferSize = bufferSize
+            onBufferSize?(bufferSize)
+        }
+
         stateLock.lock()
         let config = self.config
-        let layer = overlayLayer
+        let overlay = overlayLayer
+        let loupe = loupeLayer
+        let flash = now < flashUntil ? Float((flashUntil - now) / 0.2) : 0
         var firstFrame = false
         if let expected = expectedDeviceID,
            let input = connection.inputPorts.first?.input as? AVCaptureDeviceInput,
@@ -222,50 +315,78 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
         guard let commandQueue, let textureCache else { return }
 
-        let peakingStride: UInt64 = config.thermal >= .serious ? 2 : 1
-        let wantsPeaking = config.peakingEnabled && layer != nil && peakingPipeline != nil && frameIndex % peakingStride == 0
-        let wantsClear = !config.peakingEnabled && overlayHasContent && layer != nil
+        let overlayStride: UInt64 = config.thermal >= .serious ? 2 : 1
+        let wantsOverlay = (config.peakingEnabled || config.zebrasEnabled)
+            && overlay != nil && overlayPipeline != nil && frameIndex % overlayStride == 0
+        let wantsClear = !(config.peakingEnabled || config.zebrasEnabled) && overlayHasContent && overlay != nil
         let histogramRate: Double = config.thermal >= .serious ? 10 : 30
         let wantsHistogram = config.histogramEnabled
             && histogramPipeline != nil
             && now - lastHistogramTime >= (1.0 / histogramRate) * 0.95
+        let wantsSharpness = config.sharpnessEnabled && sharpnessPipeline != nil && onSharpness != nil
+        let wantsLoupe = config.loupeEnabled && loupe != nil && loupePipeline != nil
+        let wantsRenderer = frameRenderer != nil
 
-        guard wantsPeaking || wantsClear || wantsHistogram else { return }
+        guard wantsOverlay || wantsClear || wantsHistogram || wantsSharpness || wantsLoupe || wantsRenderer else { return }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
 
         var retained: [CVMetalTexture] = []
         guard let luma = makeTexture(pixelBuffer, plane: 0, format: .r8Unorm, cache: textureCache) else { return }
         retained.append(luma.cvTexture)
+        var chromaTexture: MTLTexture?
+        if wantsHistogram || wantsLoupe || wantsRenderer,
+           let chroma = makeTexture(pixelBuffer, plane: 1, format: .rg8Unorm, cache: textureCache) {
+            retained.append(chroma.cvTexture)
+            chromaTexture = chroma.texture
+        }
 
-        if wantsPeaking, let layer, let pipeline = peakingPipeline {
-            encodePeaking(into: commandBuffer, layer: layer, pipeline: pipeline, luma: luma.texture, config: config)
-        } else if wantsClear, let layer {
-            encodeClear(into: commandBuffer, layer: layer)
+        if wantsRenderer, let chromaTexture, let renderer = frameRenderer {
+            renderer(commandBuffer, luma.texture, chromaTexture)
+        }
+
+        if wantsOverlay, let overlay, let pipeline = overlayPipeline {
+            encodeOverlay(into: commandBuffer, layer: overlay, pipeline: pipeline, luma: luma.texture, config: config, flash: flash, time: Float(now - startTime))
+        } else if wantsClear, let overlay {
+            encodeClear(into: commandBuffer, layer: overlay)
+        }
+
+        if wantsLoupe, let loupe, let pipeline = loupePipeline, let chromaTexture {
+            encodeLoupe(into: commandBuffer, layer: loupe, pipeline: pipeline, luma: luma.texture, chroma: chromaTexture, config: config)
         }
 
         var histogramBuffer: MTLBuffer?
-        if wantsHistogram, let pipeline = histogramPipeline,
+        if wantsHistogram, let pipeline = histogramPipeline, let chromaTexture,
            histogramSlots.wait(timeout: .now()) == .success {
-            if let chroma = makeTexture(pixelBuffer, plane: 1, format: .rg8Unorm, cache: textureCache) {
-                retained.append(chroma.cvTexture)
-                let buffer = histogramBuffers[histogramBufferIndex]
-                histogramBufferIndex = (histogramBufferIndex + 1) % histogramBuffers.count
-                memset(buffer.contents(), 0, buffer.length)
-                encodeHistogram(into: commandBuffer, pipeline: pipeline, luma: luma.texture, chroma: chroma.texture, bins: buffer)
-                histogramBuffer = buffer
-                lastHistogramTime = now
-            } else {
-                histogramSlots.signal()
-            }
+            let buffer = histogramBuffers[histogramBufferIndex]
+            histogramBufferIndex = (histogramBufferIndex + 1) % histogramBuffers.count
+            memset(buffer.contents(), 0, buffer.length)
+            encodeHistogram(into: commandBuffer, pipeline: pipeline, luma: luma.texture, chroma: chromaTexture, bins: buffer)
+            histogramBuffer = buffer
+            lastHistogramTime = now
         }
 
-        let slots = histogramSlots
+        var sharpnessBuffer: MTLBuffer?
+        if wantsSharpness, let pipeline = sharpnessPipeline, sharpnessSlots.wait(timeout: .now()) == .success {
+            let buffer = sharpnessBuffers[sharpnessBufferIndex]
+            sharpnessBufferIndex = (sharpnessBufferIndex + 1) % sharpnessBuffers.count
+            memset(buffer.contents(), 0, buffer.length)
+            encodeSharpness(into: commandBuffer, pipeline: pipeline, luma: luma.texture, energy: buffer, config: config)
+            sharpnessBuffer = buffer
+        }
+
+        let histogramSemaphore = histogramSlots
+        let sharpnessSemaphore = sharpnessSlots
         commandBuffer.addCompletedHandler { [weak self] _ in
             // Keep the CVMetalTextures alive until the GPU is done with them.
             withExtendedLifetime(retained) {}
             if let histogramBuffer {
                 self?.publishHistogram(from: histogramBuffer)
-                slots.signal()
+                histogramSemaphore.signal()
+            }
+            if let sharpnessBuffer {
+                let value = sharpnessBuffer.contents().load(as: UInt32.self)
+                self?.onSharpness?(Double(value) / 4096)
+                sharpnessSemaphore.signal()
             }
         }
         commandBuffer.commit()
@@ -277,7 +398,8 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
 
     // MARK: - Encoding
 
-    private func encodePeaking(into commandBuffer: MTLCommandBuffer, layer: CAMetalLayer, pipeline: MTLComputePipelineState, luma: MTLTexture, config: Config) {
+    private func encodeOverlay(into commandBuffer: MTLCommandBuffer, layer: CAMetalLayer, pipeline: MTLComputePipelineState,
+                               luma: MTLTexture, config: Config, flash: Float, time: Float) {
         guard layer.drawableSize.width > 0, layer.drawableSize.height > 0,
               let drawable = layer.nextDrawable(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -293,7 +415,12 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             threshold: config.peakingThreshold,
             stepScale: stepScale,
             color: config.peakingColor,
-            lumaTexel: SIMD2<Float>(1 / Float(luma.width), 1 / Float(luma.height))
+            lumaTexel: SIMD2<Float>(1 / Float(luma.width), 1 / Float(luma.height)),
+            peakingEnabled: config.peakingEnabled ? 1 : 0,
+            zebrasEnabled: config.zebrasEnabled ? 1 : 0,
+            zebraThreshold: config.zebraThreshold,
+            time: time,
+            flash: flash
         )
         encoder.setComputePipelineState(pipeline)
         encoder.setTexture(luma, index: 0)
@@ -319,6 +446,40 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         overlayHasContent = false
     }
 
+    private func encodeLoupe(into commandBuffer: MTLCommandBuffer, layer: CAMetalLayer, pipeline: MTLComputePipelineState,
+                             luma: MTLTexture, chroma: MTLTexture, config: Config) {
+        guard layer.drawableSize.width > 0, layer.drawableSize.height > 0,
+              let drawable = layer.nextDrawable(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        let output = drawable.texture
+        let halfWidth = config.loupeWindow.width / 2
+        let halfHeight = config.loupeWindow.height / 2
+        // Keep the window inside the frame.
+        let center = CGPoint(
+            x: ExposureMath.clamp(config.loupeCenter.x, halfWidth, 1 - halfWidth),
+            y: ExposureMath.clamp(config.loupeCenter.y, halfHeight, 1 - halfHeight)
+        )
+        var params = LoupeParams(
+            center: SIMD2<Float>(Float(center.x), Float(center.y)),
+            windowSize: SIMD2<Float>(Float(config.loupeWindow.width), Float(config.loupeWindow.height)),
+            quarterTurns: UInt32(((config.quarterTurns % 4) + 4) % 4),
+            mirrored: config.mirrored ? 1 : 0,
+            nearest: config.loupeNearest ? 1 : 0,
+            threshold: config.peakingThreshold,
+            peakColor: config.peakingColor,
+            lumaTexel: SIMD2<Float>(1 / Float(luma.width), 1 / Float(luma.height)),
+            peaking: config.peakingEnabled ? 1 : 0
+        )
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(luma, index: 0)
+        encoder.setTexture(chroma, index: 1)
+        encoder.setTexture(output, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<LoupeParams>.stride, index: 0)
+        dispatch(encoder, pipeline: pipeline, width: output.width, height: output.height)
+        encoder.endEncoding()
+        commandBuffer.present(drawable)
+    }
+
     private func encodeHistogram(into commandBuffer: MTLCommandBuffer, pipeline: MTLComputePipelineState, luma: MTLTexture, chroma: MTLTexture, bins: MTLBuffer) {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
         var params = HistogramParams(width: UInt32(histogramGrid.width), height: UInt32(histogramGrid.height))
@@ -328,6 +489,24 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         encoder.setBuffer(bins, offset: 0, index: 0)
         encoder.setBytes(&params, length: MemoryLayout<HistogramParams>.stride, index: 1)
         dispatch(encoder, pipeline: pipeline, width: histogramGrid.width, height: histogramGrid.height)
+        encoder.endEncoding()
+    }
+
+    private func encodeSharpness(into commandBuffer: MTLCommandBuffer, pipeline: MTLComputePipelineState, luma: MTLTexture, energy: MTLBuffer, config: Config) {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
+        let rect = Self.bufferRect(forDisplayRect: config.sharpnessROI, quarterTurns: config.quarterTurns, mirrored: config.mirrored)
+        var params = SharpnessParams(
+            origin: SIMD2<Float>(Float(rect.minX), Float(rect.minY)),
+            size: SIMD2<Float>(Float(rect.width), Float(rect.height)),
+            gridWidth: UInt32(sharpnessGrid),
+            gridHeight: UInt32(sharpnessGrid),
+            lumaTexel: SIMD2<Float>(1 / Float(luma.width), 1 / Float(luma.height))
+        )
+        encoder.setComputePipelineState(pipeline)
+        encoder.setTexture(luma, index: 0)
+        encoder.setBuffer(energy, offset: 0, index: 0)
+        encoder.setBytes(&params, length: MemoryLayout<SharpnessParams>.stride, index: 1)
+        dispatch(encoder, pipeline: pipeline, width: sharpnessGrid, height: sharpnessGrid)
         encoder.endEncoding()
     }
 

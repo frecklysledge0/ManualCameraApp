@@ -47,6 +47,8 @@ struct Banner: Equatable, Identifiable, Sendable {
 struct FocusIndicator: Equatable, Sendable {
     var point: CGPoint
     var id: Int
+    /// AF-S confirmation: the frame turns to the emphasis colour (Slice 2 §8).
+    var locked = false
 }
 
 /// Capture and session status for the HUD.
@@ -68,6 +70,7 @@ final class CaptureStatus {
     var viewfinder = ViewfinderGeometry.zero
     var pendingSaveCount = 0
     var focusIndicator: FocusIndicator?
+    var isLoupeVisible = false
     private(set) var banners: [Banner] = []
 
     var canCapture: Bool {
