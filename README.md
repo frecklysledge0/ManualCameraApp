@@ -6,8 +6,8 @@ The upgrade plan lives in [`docs/superpowers/specs/2026-10-30-camera-roadmap.md`
 
 ## Features
 - **Pro interface:** an Alpha-style status header (mode · AF · format · shots left · battery, histogram and level) above a full-width 4:3 viewfinder, a Quick Fn bar (MODE · F · SS · ISO · EV · WB · FOCUS · Fn) and drum dials with 1/3-stop detents, flings and haptics. Each value is shown once. Long-press a tile to return it to AUTO; tap the format badge to switch HEIF / RAW / RAW+HEIF.
-- **Hardware shutter:** a click of Camera Control (iPhone 16 and later) or a volume button takes the photo.
-- **P / A / S / M**, with Auto ISO in M and metered-manual (M.M.) read-out. Mode changes lock the live values, so the image never jumps. On iPhone 18 Pro (iOS 27) A/S/M drive the variable aperture (ƒ/1.48–ƒ/4). Elsewhere S is emulated with a smooth auto-ISO loop.
+- **Hardware shutter, Sony-style:** press Camera Control (iPhone 16 and later) or a volume button to focus at the focus frame (green when locked), release to shoot; in AF-S the shot waits for focus. A light press opens Camera Control's own Aperture, Exposure and Focus controls and focuses too.
+- **P / A / S / M**, with Auto ISO in M and metered-manual (M.M.) read-out. Mode changes lock the live values, so the image never jumps. On iPhone 18 Pro (iOS 27) A/S/M drive the variable aperture (ƒ/1.48–ƒ/4) in 1/3 stops, wherever iOS accepts them. Elsewhere S is emulated with a smooth auto-ISO loop.
 - **Focus:** a centre focus frame that stays where you tap (long-press to re-centre) and turns green when focus is achieved; AF-S with lock confirmation, AF-C, and an MF wheel with velocity-dependent gain, a focus-snap haptic at peak sharpness, a 4×/8× loupe from the native-resolution frame and focus peaking (5 colours, 3 levels).
 - **Exposure aids:** RGB/luma histogram with clip markers, animated zebras, a two-axis level and shots left.
 - **White balance:** AWB, presets and 2500–10000 K, plus tint.

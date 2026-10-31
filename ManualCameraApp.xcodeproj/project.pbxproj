@@ -23,6 +23,10 @@
 			isa = PBXBuildFile;
 			fileRef = 3AF6A1517C14889DE19CC4FE /* FnBar.swift */;
 		};
+		188C1217FA09A4464D7FCAA3 /* ApertureTableTests.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = A538521E2631156F8A20FBBB /* ApertureTableTests.swift */;
+		};
 		1D96025993272A36109E3B25 /* LookConstants.swift in Sources */ = {
 			isa = PBXBuildFile;
 			fileRef = 3481C0B47437EC420DE45479 /* LookConstants.swift */;
@@ -86,6 +90,10 @@
 		44D2728110B9A56A11E37892 /* DeviceController.swift in Sources */ = {
 			isa = PBXBuildFile;
 			fileRef = 8AC2E507D8F174A514F6C58C /* DeviceController.swift */;
+		};
+		467A0E57FD6759CA2A049018 /* CameraControls.swift in Sources */ = {
+			isa = PBXBuildFile;
+			fileRef = B8EB58B026D93CDC4DC329F5 /* CameraControls.swift */;
 		};
 		4CB5E833F7E6DA4104743A05 /* MFNaturalColour.cube in Resources */ = {
 			isa = PBXBuildFile;
@@ -559,6 +567,12 @@
 			path = look.json;
 			sourceTree = "<group>";
 		};
+		A538521E2631156F8A20FBBB /* ApertureTableTests.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = ApertureTableTests.swift;
+			sourceTree = "<group>";
+		};
 		A9B247E2A8DAF021F45F8D9F /* ProShootingTests.swift */ = {
 			isa = PBXFileReference;
 			lastKnownFileType = sourcecode.swift;
@@ -581,6 +595,12 @@
 			isa = PBXFileReference;
 			lastKnownFileType = sourcecode.swift;
 			path = WhiteBalancePresets.swift;
+			sourceTree = "<group>";
+		};
+		B8EB58B026D93CDC4DC329F5 /* CameraControls.swift */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = CameraControls.swift;
 			sourceTree = "<group>";
 		};
 		BF3357460ACCB66ABCD0533E /* CaptureEngineTests.swift */ = {
@@ -749,6 +769,7 @@
 				4092A7479AA6D47547F883C4 /* Edition */,
 				9B89C6457B24D3B6EA3C222C /* AVCameraDevice.swift */,
 				7752887C9849F15C4060BD0E /* ApertureSupport.swift */,
+				B8EB58B026D93CDC4DC329F5 /* CameraControls.swift */,
 				9019873481CEF376D1C77248 /* CameraDevice.swift */,
 				3B05A6614A0DA8F46C39E107 /* CameraPreviewView.swift */,
 				69D05CC2C7F2CE0103F25DFE /* CaptureEngine.swift */,
@@ -817,6 +838,7 @@
 		601CFD9C1FE48B742793F6E2 /* ManualCameraAppTests */ = {
 			isa = PBXGroup;
 			children = (
+				A538521E2631156F8A20FBBB /* ApertureTableTests.swift */,
 				BF3357460ACCB66ABCD0533E /* CaptureEngineTests.swift */,
 				38B460C216F16CC83AB201F2 /* CaptureFileStoreTests.swift */,
 				8B7E4B49D9E508524FC83F72 /* DeviceCatalogTests.swift */,
@@ -1030,6 +1052,7 @@
 				79C192195A5B57A356966795 /* ManualCameraApp.swift in Sources */,
 				C7EF21046A211B074916289F /* AVCameraDevice.swift in Sources */,
 				2D2C855E286E322A86407850 /* ApertureSupport.swift in Sources */,
+				467A0E57FD6759CA2A049018 /* CameraControls.swift in Sources */,
 				BE4D670C2C2CFDC3764380C4 /* CameraDevice.swift in Sources */,
 				250B5B2EC38AEB1C8A934DE8 /* CameraPreviewView.swift in Sources */,
 				7AA065CD6635D6812769CECD /* CaptureEngine.swift in Sources */,
@@ -1083,6 +1106,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				188C1217FA09A4464D7FCAA3 /* ApertureTableTests.swift in Sources */,
 				6CB94B5AE4AD7C16528C4B4F /* CaptureEngineTests.swift in Sources */,
 				42B5EB4DF8DD9BAF696F4D09 /* CaptureFileStoreTests.swift in Sources */,
 				2EF50872734773848E40D5BD /* DeviceCatalogTests.swift in Sources */,

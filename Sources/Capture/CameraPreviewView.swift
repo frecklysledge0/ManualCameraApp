@@ -28,7 +28,8 @@ final class PreviewView: UIView {
     /// Long-press on the viewfinder: return the focus point to the centre.
     var onLongPress: (() -> Void)?
     var onGeometryChange: ((ViewfinderGeometry) -> Void)?
-    var onShutter: (() -> Void)?
+    /// Camera Control and the volume buttons (Sony-style: press = focus, release = shoot).
+    var onHardwareShutter: ((HardwareShutterPhase) -> Void)?
     private(set) var geometry = ViewfinderGeometry.zero
 
     /// Loupe panel size relative to the video width.
@@ -76,13 +77,19 @@ final class PreviewView: UIView {
         let loupeTap = UITapGestureRecognizer(target: self, action: #selector(handleLoupeTap))
         loupeView.addGestureRecognizer(loupeTap)
 
-        // Hardware shutter: a click of Camera Control (iPhone 16 and later) and the volume buttons
-        // take a photo while the session runs. The interaction is delivered on the main thread; the
-        // photo is taken on release, as with the on-screen button.
+        // Hardware shutter: Camera Control (iPhone 16 and later) and the volume buttons. Like a
+        // camera's shutter button, pressing focuses at the focus frame and releasing takes the
+        // photo. Events arrive on the main thread.
         if #available(iOS 17.2, *) {
             let interaction = AVCaptureEventInteraction { [weak self] event in
-                guard event.phase == .ended else { return }
-                MainActor.assumeIsolated { self?.onShutter?() }
+                let phase: HardwareShutterPhase
+                switch event.phase {
+                case .began: phase = .pressed
+                case .ended: phase = .released
+                case .cancelled: phase = .cancelled
+                @unknown default: return
+                }
+                MainActor.assumeIsolated { self?.onHardwareShutter?(phase) }
             }
             interaction.isEnabled = true
             addInteraction(interaction)
@@ -168,6 +175,15 @@ final class PreviewView: UIView {
         onLongPress?()
     }
 
+    /// Capture-device point (0…1, sensor orientation) for a point in video uv, for focusing at
+    /// the focus frame without a tap.
+    func devicePoint(forVideoUV uv: CGPoint) -> CGPoint {
+        let video = geometry.videoRect
+        guard video.width > 0, video.height > 0 else { return CGPoint(x: 0.5, y: 0.5) }
+        let point = CGPoint(x: video.minX + uv.x * video.width, y: video.minY + uv.y * video.height)
+        return videoPreviewLayer.captureDevicePointConverted(fromLayerPoint: point)
+    }
+
     // MARK: - Edition look layer
 
     /// Fades the look layer in or out (0.35 s, Slice 3 §4).
@@ -205,14 +221,24 @@ final class PreviewView: UIView {
     }
 }
 
+/// A hardware shutter event.
+enum HardwareShutterPhase: Sendable {
+    /// Pressed down: focus (the half-press of a camera's shutter button).
+    case pressed
+    /// Released: take the photo.
+    case released
+    /// The system took the press (for example, it opened another app).
+    case cancelled
+}
+
 /// SwiftUI wrapper. The controller receives the view once it exists and wires it to the engine.
 struct CameraPreviewView: UIViewRepresentable {
     let controller: CameraController
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView(metalDevice: controller.metalDevice)
-        view.onShutter = { [weak controller] in
-            controller?.shutterPressed()
+        view.onHardwareShutter = { [weak controller] phase in
+            controller?.hardwareShutter(phase)
         }
         controller.attachPreview(view)
         return view

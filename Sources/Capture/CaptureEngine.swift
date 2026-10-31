@@ -684,6 +684,35 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         photoOutput.capturePhoto(with: settings, delegate: delegate)
     }
 
+    // MARK: - Camera Control (iOS 18)
+
+    /// Retains the controls delegate (the session holds it weakly).
+    private var controlsDelegate: AnyObject?
+
+    /// Replaces the controls shown by a light press of Camera Control. `onActiveChange` runs on the
+    /// main queue when the overlay opens (true) or closes (false).
+    @available(iOS 18.0, *)
+    func setCameraControls(_ controls: [AVCaptureControl], onActiveChange: @escaping (Bool) -> Void) {
+        sessionQueue.async { [weak self] in
+            guard let self, self.session.supportsControls else { return }
+            let delegate = CameraControlsDelegate(onActiveChange: onActiveChange)
+            self.controlsDelegate = delegate
+            self.session.beginConfiguration()
+            for control in self.session.controls {
+                self.session.removeControl(control)
+            }
+            for control in controls {
+                if self.session.canAddControl(control) {
+                    self.session.addControl(control)
+                } else {
+                    self.logger.error("Camera Control: couldn't add a control")
+                }
+            }
+            self.session.setControlsDelegate(delegate, queue: .main)
+            self.session.commitConfiguration()
+        }
+    }
+
     // MARK: - Pending saves (§11)
 
     func retryPendingSaves(cleanOrphans: Bool = false) {

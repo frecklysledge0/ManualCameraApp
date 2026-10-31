@@ -47,6 +47,12 @@ final class CameraController {
     private var focusLockWorkItem: DispatchWorkItem?
     /// Returns the focus frame from `locked` to `idle` after the confirmation has been seen.
     private var focusStateWorkItem: DispatchWorkItem?
+    /// AF-S focus priority: the hardware shutter was released before focus locked, so the photo
+    /// is taken on lock (or after a short timeout).
+    private var shotWaitingForFocus = false
+    private var focusPriorityWorkItem: DispatchWorkItem?
+    /// `CameraControlSet` on iOS 18+ (stored untyped because of its availability).
+    private var cameraControls: AnyObject?
     private var peakDetector = SharpnessPeakDetector()
     private var isPullingFocus = false
     private var loupeCloseWorkItem: DispatchWorkItem?
@@ -518,6 +524,127 @@ final class CameraController {
         status.focusState = .locked
         haptics.play(.focusLock)
         scheduleFocusState(.idle, after: 1.5, onlyIf: .locked)
+        if shotWaitingForFocus { takeShotWaitingForFocus() }
+    }
+
+    // MARK: - Hardware shutter (Camera Control, volume buttons)
+
+    /// Sony-style shutter button: pressing focuses at the focus frame (the centre unless you
+    /// tapped elsewhere), holding keeps the confirmation, releasing takes the photo. In AF-S the
+    /// photo waits for focus to lock (at most 0.6 s), so a quick click never shoots mid-focus.
+    func hardwareShutter(_ phase: HardwareShutterPhase) {
+        switch phase {
+        case .pressed:
+            halfPress()
+        case .released:
+            if settings.focusMode == .single && awaitingFocusLock {
+                shotWaitingForFocus = true
+                focusPriorityWorkItem?.cancel()
+                let item = DispatchWorkItem { [weak self] in
+                    guard let self else { return }
+                    MainActor.assumeIsolated {
+                        if self.shotWaitingForFocus { self.takeShotWaitingForFocus() }
+                    }
+                }
+                focusPriorityWorkItem = item
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: item)
+            } else {
+                shutterPressed()
+            }
+        case .cancelled:
+            shotWaitingForFocus = false
+            focusPriorityWorkItem?.cancel()
+        }
+    }
+
+    /// The half-press: AF-S focuses once at the focus frame and confirms in green; AF-C is already
+    /// tracking, so the frame just confirms when the lens is settled. Nothing happens in MF.
+    /// Also called when a light press of Camera Control opens its controls.
+    func halfPress() {
+        guard status.canCapture else { return }
+        switch settings.focusMode {
+        case .single:
+            // A click always passes through a light press: keep a focus that is running or has
+            // just locked instead of starting again, so the click shoots straight away.
+            guard !awaitingFocusLock, status.focusState != .locked else { return }
+            let devicePoint = status.focusPointUV.flatMap { previewView?.devicePoint(forVideoUV: $0) } ?? CGPoint(x: 0.5, y: 0.5)
+            focusStateWorkItem?.cancel()
+            beginFocusLock()
+            engine.send(.focus(.singleAuto(point: devicePoint)))
+        case .continuous:
+            focusStateWorkItem?.cancel()
+            if telemetry.isAdjustingFocus {
+                status.focusState = .searching
+            } else {
+                status.focusState = .locked
+                haptics.play(.focusLock)
+                scheduleFocusState(.idle, after: 1.0, onlyIf: .locked)
+            }
+        case .manual:
+            break
+        }
+    }
+
+    /// Builds the Camera Control overlay's controls for the current lens: Aperture (every
+    /// accepted 1/3 stop, on lenses with a moving iris), Exposure and Focus. Rebuilt only when
+    /// the lens's stops change.
+    private func updateCameraControls() {
+        guard #available(iOS 18.0, *) else { return }
+        let apertureStops = settings.capability.hasVariableAperture ? settings.apertureStops : []
+        let evStops = settings.evStops
+        if let existing = cameraControls as? CameraControlSet,
+           existing.apertureStops == apertureStops, existing.evStops == evStops {
+            syncCameraControls()
+            return
+        }
+        let set = CameraControlSet(
+            apertureStops: apertureStops,
+            evStops: evStops,
+            onAperture: { [weak self] value in self?.setAperture(value) },
+            onExposure: { [weak self] value in self?.setBias(value) },
+            onFocus: { [weak self] value in self?.setLensPositionFromCameraControl(value) }
+        )
+        cameraControls = set
+        set.sync(aperture: currentAperture, bias: settings.exposure.bias, lensPosition: currentLensPosition)
+        engine.setCameraControls(set.controls) { [weak self] active in
+            guard let self else { return }
+            MainActor.assumeIsolated { self.cameraControlsChanged(active: active) }
+        }
+    }
+
+    private var currentAperture: Float {
+        settings.isAutomatic(.aperture) && telemetry.liveAperture > 0 ? telemetry.liveAperture : settings.exposure.aperture
+    }
+
+    private var currentLensPosition: Float {
+        settings.focusMode == .manual ? settings.lensPosition : telemetry.liveLensPosition
+    }
+
+    private func syncCameraControls() {
+        guard #available(iOS 18.0, *), let set = cameraControls as? CameraControlSet else { return }
+        set.sync(aperture: currentAperture, bias: settings.exposure.bias, lensPosition: currentLensPosition)
+    }
+
+    /// A light press opened the overlay: show the current values and focus (the half-press).
+    private func cameraControlsChanged(active: Bool) {
+        guard active else { return }
+        syncCameraControls()
+        halfPress()
+    }
+
+    /// The Focus control drives the lens directly (switching to MF), like turning a focus ring.
+    private func setLensPositionFromCameraControl(_ value: Float) {
+        if settings.focusMode != .manual { setFocusMode(.manual) }
+        let position = ExposureMath.clamp(value, 0, 1)
+        settings.lensPosition = position
+        engine.send(.focus(.locked(lensPosition: position)))
+        scheduleSave()
+    }
+
+    private func takeShotWaitingForFocus() {
+        shotWaitingForFocus = false
+        focusPriorityWorkItem?.cancel()
+        shutterPressed()
     }
 
     private func scheduleFocusState(_ state: FocusFrameState, after delay: TimeInterval, onlyIf current: FocusFrameState) {
@@ -957,6 +1084,7 @@ final class CameraController {
             }
             engine.setCaptureFormat(settings.effectiveFormat)
             editionRenderer?.setSourceIsP3(limits.videoIsP3)
+            updateCameraControls()
             previewView?.refreshGeometry()
             updateShotsLeft()
             if expectingLensSwitchHaptic {

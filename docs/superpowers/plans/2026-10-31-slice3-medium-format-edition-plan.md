@@ -50,3 +50,9 @@ This slice also carries the UI and capture fixes reported after Slice 2: duplica
 3. Focus frame: tap moves it, it stays, long-press re-centres, green on lock, hidden in MF.
 4. Edition: the preview look matches the developed photo; 1:1 and XPAN crops match the mattes; the shutter sound is muted by the silent switch; a five-shot burst saves five photos.
 5. Supply the golden set (`Tests/Golden/<name>.dng` + `<name>.png`) to activate `GoldenImageTests`.
+
+## 6. Follow-up (31 Oct): Camera Control half-press, full aperture control, Edition switch
+- **Half-press.** Pressing Camera Control or a volume button now focuses (AF-S at the focus frame, the centre unless moved; AF-C confirms when the lens is settled), and releasing takes the photo. In AF-S a release before lock waits for the lock, at most 0.6 s. iOS gives apps no light-press event, so a light press is detected through the Camera Control overlay opening (`AVCaptureSessionControlsDelegate`) and triggers the same half-press. A click that follows a light press keeps that focus instead of restarting it.
+- **Camera Control controls** (iOS 18+, `Capture/CameraControls.swift`): Aperture (variable-aperture lenses), Exposure and Focus sliders in the overlay, routed through the controller so the app's state stays in sync.
+- **Aperture.** The dial now offers every 1/3 stop between the iris's limits (`ExposureMath.apertureTable`: ƒ/1.48, 1.6, 1.8, 2, 2.2, 2.5, 2.8, 3.2, 3.5, 4), keeping each one that `supportsExposureModeCustom(lensAperture:…)` accepts. This supersedes the Slice 2 decision to offer only `recommendedLensApertureStops`. If the hardware accepts only the recommended stops, the dial falls back to those.
+- **Edition switch.** An "MF" badge in the strip turns the Edition on and off (it was only in the Fn sheet).

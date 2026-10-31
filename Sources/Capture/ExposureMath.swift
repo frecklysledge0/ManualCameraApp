@@ -181,6 +181,38 @@ enum ExposureMath {
         fullStopShutterSpeeds.contains { abs($0 - seconds) / $0 < 0.01 }
     }
 
+    /// The 1/3-stop ƒ-numbers engraved on lens barrels.
+    static let thirdStopApertures: [Float] = [
+        1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.2, 3.5, 4.0, 4.5, 5.0, 5.6,
+        6.3, 7.1, 8.0, 9.0, 10, 11, 13, 14, 16, 18, 20, 22
+    ]
+    static let fullStopApertures: [Float] = [1.0, 1.4, 2.0, 2.8, 4.0, 5.6, 8.0, 11, 16, 22]
+
+    /// Every 1/3 stop from the lens's widest to its smallest aperture: the exact ends, Apple's
+    /// recommended stops and the standard third stops between them (Slice 3 follow-up: full
+    /// aperture control instead of only the recommended stops). Values closer than ~1/12 stop
+    /// collapse into one, preferring the exact end or a recommended stop.
+    static func apertureTable(min minimum: Float, max maximum: Float, recommended: [Float]) -> [Float] {
+        guard minimum.isFinite, maximum.isFinite, minimum > 0, maximum >= minimum else { return [] }
+        guard maximum / minimum > 1.01 else { return [minimum] }
+        let preferred = ([minimum, maximum] + recommended.filter { $0 >= minimum * 0.999 && $0 <= maximum * 1.001 })
+        let standard = thirdStopApertures.filter { $0 > minimum && $0 < maximum }
+        var table: [Float] = []
+        for value in (preferred + standard).sorted() {
+            if let last = table.last, value / last < 1.03 {
+                // Keep the preferred one of two near-duplicates.
+                if preferred.contains(value) && !preferred.contains(last) { table[table.count - 1] = value }
+                continue
+            }
+            table.append(value)
+        }
+        return table
+    }
+
+    static func isFullStop(aperture: Float) -> Bool {
+        fullStopApertures.contains { abs($0 - aperture) / $0 < 0.02 }
+    }
+
     static func isFullStop(iso: Float) -> Bool {
         fullStopISOs.contains { abs($0 - iso) / $0 < 0.01 }
     }

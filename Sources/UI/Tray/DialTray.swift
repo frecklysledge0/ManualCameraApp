@@ -104,7 +104,15 @@ private struct ApertureTray: View {
             let current = isAuto ? controller.telemetry.liveAperture : settings.exposure.aperture
             HStack(spacing: 8) {
                 DialView(
-                    stops: stops.map { DialStop(label: ExposureMath.formatAperture($0), isMajor: true) },
+                    // Thirds between full stops are minor ticks; the ends and full stops are labelled.
+                    stops: stops.enumerated().map { index, fNumber in
+                        let isEnd = index == 0 || index == stops.count - 1
+                        // A full stop right next to an end would collide with the end's label.
+                        let isLabelledFullStop = ExposureMath.isFullStop(aperture: fNumber) && index >= 2 && index <= stops.count - 3
+                        let major = isEnd || isLabelledFullStop
+                        let text = ExposureMath.formatAperture(fNumber)
+                        return DialStop(label: major ? text : nil, isMajor: major, spokenValue: text)
+                    },
                     selectedIndex: ExposureMath.nearestIndex(of: current, in: stops),
                     isAuto: isAuto,
                     accessibilityName: "Aperture",
@@ -140,7 +148,7 @@ private struct ShutterTray: View {
         DialView(
             stops: stops.map { seconds in
                 let major = ExposureMath.isFullStop(shutter: seconds)
-                return DialStop(label: major ? ExposureMath.formatShutter(seconds) : nil, isMajor: major)
+                return DialStop(label: major ? ExposureMath.formatShutter(seconds) : nil, isMajor: major, spokenValue: ExposureMath.formatShutter(seconds))
             },
             selectedIndex: ExposureMath.nearestIndex(of: current, in: stops),
             isEnabled: stops.count > 1,
@@ -164,7 +172,7 @@ private struct ISOTray: View {
         DialView(
             stops: stops.map { iso in
                 let major = ExposureMath.isFullStop(iso: iso)
-                return DialStop(label: major ? ExposureMath.formatISO(iso) : nil, isMajor: major)
+                return DialStop(label: major ? ExposureMath.formatISO(iso) : nil, isMajor: major, spokenValue: ExposureMath.formatISO(iso))
             },
             selectedIndex: ExposureMath.nearestIndex(of: current, in: stops),
             isEnabled: stops.count > 1,
@@ -191,7 +199,7 @@ private struct EVTray: View {
             DialView(
                 stops: stops.map { bias in
                     let major = abs(bias - bias.rounded()) < 0.01
-                    return DialStop(label: major ? ExposureMath.formatEV(bias) : nil, isMajor: major)
+                    return DialStop(label: major ? ExposureMath.formatEV(bias) : nil, isMajor: major, spokenValue: ExposureMath.formatEV(bias))
                 },
                 selectedIndex: ExposureMath.nearestLinearIndex(of: settings.exposure.bias, in: stops),
                 isEnabled: stops.count > 1,

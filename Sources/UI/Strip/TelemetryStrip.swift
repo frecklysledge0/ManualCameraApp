@@ -45,10 +45,7 @@ private struct ProStatusHeader: View {
         }
         Spacer(minLength: 6)
         FormatBadge(controller: controller)
-        Text(FramingMode.native.label)
-          .font(theme.labelFont)
-          .tracking(theme.labelTracking)
-          .foregroundColor(theme.secondaryText)
+        EditionSwitch(controller: controller)
         Spacer(minLength: 6)
         ShotsLeftView(telemetry: controller.telemetry)
         BatteryView()
@@ -92,6 +89,27 @@ private struct FormatBadge: View {
   }
 }
 
+/// One tap in and out of the Medium Format Edition: an outlined "MF" in the Pro theme, inverted
+/// (active) inside the Edition.
+private struct EditionSwitch: View {
+  let controller: CameraController
+
+  var body: some View {
+    let isEdition = controller.settings.isEdition
+    Button {
+      controller.setEdition(!isEdition)
+    } label: {
+      BadgeView("MF", isActive: isEdition)
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .accessibilityLabel(Branding.editionName)
+    .accessibilityValue(isEdition ? "On" : "Off")
+    .accessibilityHint(isEdition ? "Double-tap to return to the Pro interface." : "Double-tap to switch on.")
+  }
+}
+
 private struct StatusPill: View {
   let text: String
   @Environment(\.cameraTheme) var theme
@@ -118,6 +136,7 @@ private struct EditionReadoutStrip: View {
     let telemetry = controller.telemetry
     VStack(spacing: 4) {
       HStack(spacing: 8) {
+        EditionSwitch(controller: controller)
         Button {
           controller.cycleFraming()
         } label: {

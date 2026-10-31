@@ -5,6 +5,8 @@ struct DialStop: Equatable, Sendable {
     /// Text drawn under major ticks (nil for minor ticks).
     var label: String?
     var isMajor: Bool
+    /// What VoiceOver reads for this stop (minor ticks have no label).
+    var spokenValue: String?
 }
 
 /// The drum dial (Slice 2 §5): drag 1:1, fling with deceleration that snaps to a detent, a
@@ -120,7 +122,7 @@ struct DialView: View {
         .opacity(isEnabled ? 1 : 0.4)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityName)
-        .accessibilityValue(isAuto ? "Auto" : (stops.indices.contains(selectedIndex) ? (stops[selectedIndex].label ?? "\(selectedIndex)") : ""))
+        .accessibilityValue(isAuto ? "Auto" : (stops.indices.contains(selectedIndex) ? (stops[selectedIndex].spokenValue ?? stops[selectedIndex].label ?? "\(selectedIndex)") : ""))
         .accessibilityAdjustableAction { direction in
             guard isEnabled else { return }
             switch direction {
