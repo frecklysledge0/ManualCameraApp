@@ -1,0 +1,46 @@
+{
+  "name": "MF Natural Colour",
+  "version": 1,
+  "notes": "Original medium-format-inspired look. Every number that shapes the look lives here; make_look.py turns it into the 3D LUT and the Swift constants, so the live preview and the developed still use identical values.",
+  "develop": {
+    "sharpnessAmount": 0.0,
+    "localToneMapAmount": 0.3,
+    "boostAmount": 0.75,
+    "luminanceNoiseReductionAmount": 0.15
+  },
+  "shaper": {
+    "comment": "LUT input is s = (linear / maxLinear)^(1/exponent), linear Display P3",
+    "maxLinear": 8.0,
+    "exponent": 3.0
+  },
+  "lutSize": 65,
+  "colour": {
+    "saturation": 0.95,
+    "reds":   { "centerHue": 29,  "width": 34, "hueShift": 5.0,  "chroma": 1.0 },
+    "greens": { "centerHue": 142, "width": 46, "hueShift": -7.0, "chroma": 0.88 },
+    "blues":  { "centerHue": 262, "width": 44, "hueShift": -6.0, "chroma": 0.94 }
+  },
+  "skin": {
+    "bandStart": 20, "bandEnd": 60, "targetHue": 45, "pull": 0.35,
+    "chromaKnee": 0.11, "chromaCompression": 0.5,
+    "lightnessMin": 0.35, "lightnessMax": 0.92,
+    "magentaGuard": 0.6
+  },
+  "tone": {
+    "toe": 0.004,
+    "midContrast": 1.05,
+    "midGrey": 0.18,
+    "shoulderStart": 0.42,
+    "highlightDesaturationStart": 0.78,
+    "highlightDesaturation": 0.55
+  },
+  "grain": {
+    "fine":   { "amplitude": 0.020, "size": 1.0 },
+    "medium": { "amplitude": 0.034, "size": 1.35 },
+    "referenceHeight": 4000,
+    "octaveWeights": [0.6, 0.3, 0.1],
+    "isoBoostPerStop": 0.12,
+    "isoBoostMax": 1.6,
+    "previewAmplitudeScale": 0.5
+  }
+}

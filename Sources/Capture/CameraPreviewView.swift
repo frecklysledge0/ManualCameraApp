@@ -3,9 +3,9 @@ import AVKit
 import SwiftUI
 import UIKit
 
-/// UIKit host for the camera image: the preview layer, the Metal overlay (peaking + zebras), the
-/// loupe and the blurred snapshot shown during lens switches. All of them use the same
-/// `ViewfinderGeometry`.
+/// UIKit host for the camera image: the preview layer, the Edition's look layer, the Metal overlay
+/// (peaking + zebras), the loupe and the blurred snapshot shown during lens switches. All of them
+/// use the same `ViewfinderGeometry`.
 final class PreviewView: UIView {
 
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
@@ -14,13 +14,19 @@ final class PreviewView: UIView {
         layer as! AVCaptureVideoPreviewLayer // swiftlint:disable:this force_cast
     }
 
+    /// The Edition's live look (Slice 3 §7): an opaque layer above the preview layer that shows each
+    /// frame through the same LUT as the developed photo. Hidden in the Pro theme.
+    let lookView: MetalOverlayView
     let overlayView: MetalOverlayView
     let loupeView: MetalOverlayView
     private let snapshotView = UIImageView()
+    private var tapRecognizer: UITapGestureRecognizer?
 
     /// Tap location in view points and in capture-device coordinates (0…1).
     var onTap: ((CGPoint, CGPoint) -> Void)?
     var onLoupeTap: (() -> Void)?
+    /// Long-press on the viewfinder: return the focus point to the centre.
+    var onLongPress: (() -> Void)?
     var onGeometryChange: ((ViewfinderGeometry) -> Void)?
     var onShutter: (() -> Void)?
     private(set) var geometry = ViewfinderGeometry.zero
@@ -30,6 +36,7 @@ final class PreviewView: UIView {
     private let loupeInset: CGFloat = 10
 
     init(metalDevice: MTLDevice?) {
+        lookView = MetalOverlayView(device: metalDevice, maxDrawableDimension: 1600)
         overlayView = MetalOverlayView(device: metalDevice, maxDrawableDimension: 1100)
         loupeView = MetalOverlayView(device: metalDevice, maxDrawableDimension: 900)
         super.init(frame: .zero)
@@ -50,24 +57,34 @@ final class PreviewView: UIView {
         loupeView.accessibilityLabel = "Focus loupe"
         loupeView.accessibilityTraits = .button
 
+        lookView.alpha = 0
+        lookView.isHidden = true
+        lookView.backgroundColor = .black
+        lookView.metalLayer.isOpaque = true
+
+        addSubview(lookView)
         addSubview(overlayView)
         addSubview(snapshotView)
         addSubview(loupeView)
 
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         addGestureRecognizer(tap)
+        tapRecognizer = tap
+        let longPress = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPress(_:)))
+        longPress.minimumPressDuration = 0.5
+        addGestureRecognizer(longPress)
         let loupeTap = UITapGestureRecognizer(target: self, action: #selector(handleLoupeTap))
         loupeView.addGestureRecognizer(loupeTap)
 
-        // Hardware Camera Control (iPhone 16 / 17 / 18 side button) support
+        // Hardware shutter: a click of Camera Control (iPhone 16 and later) and the volume buttons
+        // take a photo while the session runs. The interaction is delivered on the main thread; the
+        // photo is taken on release, as with the on-screen button.
         if #available(iOS 17.2, *) {
             let interaction = AVCaptureEventInteraction { [weak self] event in
-                if event.phase == .ended {
-                    DispatchQueue.main.async {
-                        self?.onShutter?()
-                    }
-                }
+                guard event.phase == .ended else { return }
+                MainActor.assumeIsolated { self?.onShutter?() }
             }
+            interaction.isEnabled = true
             addInteraction(interaction)
         }
     }
@@ -90,6 +107,9 @@ final class PreviewView: UIView {
         let newGeometry = ViewfinderGeometry(bounds: bounds, videoRect: videoRect.integral)
         if overlayView.frame != newGeometry.videoRect {
             overlayView.frame = newGeometry.videoRect
+        }
+        if lookView.frame != newGeometry.videoRect {
+            lookView.frame = newGeometry.videoRect
         }
         snapshotView.frame = newGeometry.videoRect
         let side = (newGeometry.videoRect.width * loupeWidthFraction).rounded()
@@ -135,6 +155,35 @@ final class PreviewView: UIView {
 
     @objc private func handleLoupeTap() {
         onLoupeTap?()
+    }
+
+    @objc private func handleLongPress(_ recognizer: UILongPressGestureRecognizer) {
+        guard recognizer.state == .began else { return }
+        let point = recognizer.location(in: self)
+        guard geometry.videoRect.contains(point) else { return }
+        if loupeView.alpha > 0.01, loupeView.frame.contains(point) { return }
+        // Cancel the tap that would otherwise fire when the finger lifts.
+        tapRecognizer?.isEnabled = false
+        tapRecognizer?.isEnabled = true
+        onLongPress?()
+    }
+
+    // MARK: - Edition look layer
+
+    /// Fades the look layer in or out (0.35 s, Slice 3 §4).
+    func setLookVisible(_ visible: Bool, animated: Bool = true) {
+        let target: CGFloat = visible ? 1 : 0
+        if visible { lookView.isHidden = false }
+        let apply = { self.lookView.alpha = target }
+        let finish: (Bool) -> Void = { _ in
+            if !visible, self.lookView.alpha == 0 { self.lookView.isHidden = true }
+        }
+        if animated {
+            UIView.animate(withDuration: 0.35, delay: 0, options: [.beginFromCurrentState, .curveEaseInOut], animations: apply, completion: finish)
+        } else {
+            apply()
+            finish(true)
+        }
     }
 
     // MARK: - Lens-switch snapshot

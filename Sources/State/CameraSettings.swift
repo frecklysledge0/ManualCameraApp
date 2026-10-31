@@ -35,7 +35,8 @@ final class CameraSettings {
 
     // MARK: Capture format
     var rawSupported = false
-    var rawEnabled = true
+    /// What the user wants to save (Fn › Format).
+    var captureFormat: CaptureFormat = .raw
     var rawSuppressedForStorage = false
 
     // MARK: Overlays and feedback
@@ -43,12 +44,27 @@ final class CameraSettings {
     var haptics = HapticSettings()
     var theme: ThemeID = .alpha
 
+    // MARK: Medium Format Edition (Slice 3)
+    var framing: FramingMode = .native
+    var grain: GrainLevel = .fine
+    var shutterSound: ShutterSoundVolume = .low
+    var previewGrain = false
+    /// Debug-only performance read-out (feed fps, UI fps, shutter lag).
+    var showPerformanceHUD = false
+
+    var isEdition: Bool { theme == .edition }
+
     // MARK: Derived
 
     var isFrontCamera: Bool { lens?.isFront ?? false }
 
-    /// RAW+HEIF only when the user wants it, the hardware supports it and storage allows it.
-    var effectiveRaw: Bool { rawEnabled && rawSupported && !rawSuppressedForStorage }
+    /// The format actually used: RAW needs hardware support and enough free space.
+    var effectiveFormat: CaptureFormat {
+        guard captureFormat.includesRaw, rawSupported, !rawSuppressedForStorage else { return .heif }
+        return captureFormat
+    }
+
+    var effectiveRaw: Bool { effectiveFormat.includesRaw }
 
     var backLenses: [LensOption] { lenses.filter { !$0.isFront } }
 
@@ -96,9 +112,13 @@ final class CameraSettings {
         tint = profile.tint
         focusMode = profile.focusMode
         overlays = profile.overlays
-        rawEnabled = profile.rawEnabled
+        captureFormat = profile.captureFormat
         haptics = profile.haptics
         theme = profile.theme
+        framing = profile.framing
+        grain = profile.grain
+        shutterSound = profile.shutterSound
+        previewGrain = profile.previewGrain
     }
 
     /// Writes the current state into `profile` (keeps other modes' values).
@@ -109,9 +129,13 @@ final class CameraSettings {
         profile.tint = tint
         profile.focusMode = focusMode
         profile.overlays = overlays
-        profile.rawEnabled = rawEnabled
+        profile.captureFormat = captureFormat
         profile.haptics = haptics
         profile.theme = theme
+        profile.framing = framing
+        profile.grain = grain
+        profile.shutterSound = shutterSound
+        profile.previewGrain = previewGrain
         if let lens, !lens.isFront { profile.lensKind = lens.kind }
     }
 }

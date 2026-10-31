@@ -15,6 +15,10 @@ enum HapticEvent: CaseIterable, Hashable, Sendable {
     case modeChange
     /// Very light tick for the MF wheel (every 1/50 of travel).
     case focusTick
+    /// Turning the Medium Format Edition on or off (Slice 3 §3).
+    case edition
+    /// The Edition's shutter: softer than `shutterPress` (Slice 3 §8).
+    case leafShutter
 
     struct Transient: Sendable {
         let intensity: Float
@@ -44,6 +48,10 @@ enum HapticEvent: CaseIterable, Hashable, Sendable {
             return [Transient(intensity: 0.7, sharpness: 0.4, time: 0)]
         case .focusTick:
             return [Transient(intensity: 0.22, sharpness: 0.9, time: 0)]
+        case .edition:
+            return [Transient(intensity: 0.45, sharpness: 0.2, time: 0), Transient(intensity: 0.25, sharpness: 0.1, time: 0.07)]
+        case .leafShutter:
+            return [Transient(intensity: 0.55, sharpness: 0.35, time: 0), Transient(intensity: 0.35, sharpness: 0.8, time: 0.028)]
         }
     }
 }

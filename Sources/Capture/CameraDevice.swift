@@ -21,6 +21,8 @@ struct DeviceLimits: Equatable, Sendable {
     var aperture: Float = 1.8
     /// Variable aperture and iOS 27 priority-mode support.
     var exposure: ExposureCapability = .fixed
+    /// Video frames are Display P3 (wide colour), not BT.709.
+    var videoIsP3 = true
 
     static let `default` = DeviceLimits()
 

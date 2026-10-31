@@ -161,9 +161,9 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     private var lastBufferSize = CGSize.zero
     private let startTime = ProcessInfo.processInfo.systemUptime
 
-    /// Hook for the Slice 3 Metal preview renderer: called on `videoQueue` with each frame's
-    /// textures, inside the frame's command buffer.
-    var frameRenderer: ((MTLCommandBuffer, MTLTexture, MTLTexture) -> Void)?
+    /// The Slice 3 Edition preview renderer, called on `videoQueue` with each frame's textures
+    /// inside the frame's command buffer. Set with `setFrameRenderer`.
+    private var frameRenderer: ((MTLCommandBuffer, MTLTexture, MTLTexture, Config) -> Void)?
 
     // GPU-completion state
     private let histogramLock = NSLock()
@@ -228,6 +228,12 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         stateLock.unlock()
     }
 
+    func setFrameRenderer(_ renderer: ((MTLCommandBuffer, MTLTexture, MTLTexture, Config) -> Void)?) {
+        stateLock.lock()
+        frameRenderer = renderer
+        stateLock.unlock()
+    }
+
     /// Brightens peaking briefly (the focus-snap flash).
     func flashPeaking(duration: TimeInterval = 0.2) {
         stateLock.lock()
@@ -245,7 +251,7 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
     // MARK: - Snapshot for lens switches (Slice 1 §8)
 
     /// Blurred, display-oriented copy of the latest frame. Calls back on `videoQueue`.
-    func makeSnapshot(maxDimension: CGFloat = 480, completion: @escaping (CGImage?) -> Void) {
+    func makeSnapshot(maxDimension: CGFloat = 480, blurred: Bool = true, completion: @escaping (CGImage?) -> Void) {
         videoQueue.async { [weak self] in
             guard let self, let buffer = self.latestPixelBuffer else {
                 completion(nil)
@@ -262,8 +268,8 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
                 image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             }
             let extent = image.extent
-            let blurred = image.clampedToExtent().applyingGaussianBlur(sigma: 8).cropped(to: extent)
-            completion(self.snapshotContext.createCGImage(blurred, from: extent))
+            let output = blurred ? image.clampedToExtent().applyingGaussianBlur(sigma: 8).cropped(to: extent) : image
+            completion(self.snapshotContext.createCGImage(output, from: extent))
         }
     }
 
@@ -302,6 +308,7 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
         let config = self.config
         let overlay = overlayLayer
         let loupe = loupeLayer
+        let renderer = frameRenderer
         let flash = now < flashUntil ? Float((flashUntil - now) / 0.2) : 0
         var firstFrame = false
         if let expected = expectedDeviceID,
@@ -325,7 +332,7 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             && now - lastHistogramTime >= (1.0 / histogramRate) * 0.95
         let wantsSharpness = config.sharpnessEnabled && sharpnessPipeline != nil && onSharpness != nil
         let wantsLoupe = config.loupeEnabled && loupe != nil && loupePipeline != nil
-        let wantsRenderer = frameRenderer != nil
+        let wantsRenderer = renderer != nil
 
         guard wantsOverlay || wantsClear || wantsHistogram || wantsSharpness || wantsLoupe || wantsRenderer else { return }
         guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
@@ -340,8 +347,8 @@ final class FramePipeline: NSObject, AVCaptureVideoDataOutputSampleBufferDelegat
             chromaTexture = chroma.texture
         }
 
-        if wantsRenderer, let chromaTexture, let renderer = frameRenderer {
-            renderer(commandBuffer, luma.texture, chromaTexture)
+        if let renderer, let chromaTexture {
+            renderer(commandBuffer, luma.texture, chromaTexture, config)
         }
 
         if wantsOverlay, let overlay, let pipeline = overlayPipeline {

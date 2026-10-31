@@ -105,9 +105,14 @@ struct ShootingProfile: Equatable, Codable, Sendable {
     var whiteBalance: WhiteBalanceStop = .auto
     var tint: Float = 0
     var overlays = OverlaySettings()
-    var rawEnabled = true
+    var captureFormat: CaptureFormat = .raw
     var haptics = HapticSettings()
     var theme: ThemeID = .alpha
+    // Medium Format Edition (Slice 3)
+    var framing: FramingMode = .native
+    var grain: GrainLevel = .fine
+    var shutterSound: ShutterSoundVolume = .low
+    var previewGrain = false
 
     static let storageKey = "shootingProfile.v1"
 
@@ -128,7 +133,7 @@ struct ShootingProfile: Equatable, Codable, Sendable {
               let profile = try? JSONDecoder().decode(ShootingProfile.self, from: data) else {
             var fresh = ShootingProfile()
             // Carry over the Slice 1 RAW toggle.
-            if let raw = defaults.object(forKey: "rawEnabled") as? Bool { fresh.rawEnabled = raw }
+            if let raw = defaults.object(forKey: "rawEnabled") as? Bool { fresh.captureFormat = raw ? .raw : .heif }
             return fresh
         }
         return profile
@@ -143,7 +148,28 @@ struct ShootingProfile: Equatable, Codable, Sendable {
     // MARK: Codable (lenient)
 
     private enum CodingKeys: String, CodingKey {
-        case program, modeValues, lensKind, focusMode, whiteBalance, tint, overlays, rawEnabled, haptics, theme
+        case program, modeValues, lensKind, focusMode, whiteBalance, tint, overlays, captureFormat, haptics, theme
+        case framing, grain, shutterSound, previewGrain
+        // Slices 1–2 stored a Bool; read it when migrating.
+        case rawEnabled
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(program, forKey: .program)
+        try container.encode(modeValues, forKey: .modeValues)
+        try container.encode(lensKind, forKey: .lensKind)
+        try container.encode(focusMode, forKey: .focusMode)
+        try container.encode(whiteBalance, forKey: .whiteBalance)
+        try container.encode(tint, forKey: .tint)
+        try container.encode(overlays, forKey: .overlays)
+        try container.encode(captureFormat, forKey: .captureFormat)
+        try container.encode(haptics, forKey: .haptics)
+        try container.encode(theme, forKey: .theme)
+        try container.encode(framing, forKey: .framing)
+        try container.encode(grain, forKey: .grain)
+        try container.encode(shutterSound, forKey: .shutterSound)
+        try container.encode(previewGrain, forKey: .previewGrain)
     }
 
     init(from decoder: Decoder) throws {
@@ -156,8 +182,18 @@ struct ShootingProfile: Equatable, Codable, Sendable {
         whiteBalance = (try? container.decodeIfPresent(WhiteBalanceStop.self, forKey: .whiteBalance)) ?? defaults.whiteBalance
         tint = (try? container.decodeIfPresent(Float.self, forKey: .tint)) ?? defaults.tint
         overlays = (try? container.decodeIfPresent(OverlaySettings.self, forKey: .overlays)) ?? defaults.overlays
-        rawEnabled = (try? container.decodeIfPresent(Bool.self, forKey: .rawEnabled)) ?? defaults.rawEnabled
+        if let format = try? container.decodeIfPresent(CaptureFormat.self, forKey: .captureFormat) {
+            captureFormat = format
+        } else if let raw = try? container.decodeIfPresent(Bool.self, forKey: .rawEnabled) {
+            captureFormat = raw ? .raw : .heif
+        } else {
+            captureFormat = defaults.captureFormat
+        }
         haptics = (try? container.decodeIfPresent(HapticSettings.self, forKey: .haptics)) ?? defaults.haptics
         theme = (try? container.decodeIfPresent(ThemeID.self, forKey: .theme)) ?? defaults.theme
+        framing = (try? container.decodeIfPresent(FramingMode.self, forKey: .framing)) ?? defaults.framing
+        grain = (try? container.decodeIfPresent(GrainLevel.self, forKey: .grain)) ?? defaults.grain
+        shutterSound = (try? container.decodeIfPresent(ShutterSoundVolume.self, forKey: .shutterSound)) ?? defaults.shutterSound
+        previewGrain = (try? container.decodeIfPresent(Bool.self, forKey: .previewGrain)) ?? defaults.previewGrain
     }
 }

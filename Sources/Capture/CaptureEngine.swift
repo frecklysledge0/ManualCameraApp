@@ -3,6 +3,11 @@ import Foundation
 import os
 import UIKit
 
+/// Holds a thumbnail across the photo callbacks of one shot.
+private final class ThumbnailBox: @unchecked Sendable {
+    var image: UIImage?
+}
+
 /// Owns the `AVCaptureSession` and everything attached to it (§5). All mutable state is confined
 /// to `sessionQueue`; results reach the UI only through `onEvent`, which is always called on the
 /// main thread. The engine never imports SwiftUI or touches the state objects.
@@ -27,6 +32,8 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         case feedRate(Double)
         case pendingSaves(Int)
         case focusAdjusting(Bool)
+        /// Shots between the shutter press and the save.
+        case inFlight(Int)
     }
 
     /// Called on the main thread.
@@ -37,6 +44,8 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
     let catalog: DeviceCatalog
 
     private let sessionQueue = DispatchQueue(label: "camera.sessionQueue", qos: .userInitiated)
+    /// Edition develops (serial: one 48 MP develop in memory at a time).
+    private let developQueue = DispatchQueue(label: "camera.developQueue", qos: .userInitiated)
     private let logger = Logger(subsystem: "ManualCameraApp", category: "CaptureEngine")
 
     // sessionQueue-confined state
@@ -62,7 +71,10 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
     private var isConfigured = false
     private var wantsRunning = false
     private var didRetryAfterError = false
-    private var rawRequested = true
+    /// The format prepared first (the one the user shoots).
+    private var preparedFormat: CaptureFormat = .raw
+    /// Shots captured but not yet saved (the Edition holds the shutter at 3, Slice 3 §6).
+    private var developingCount = 0
     private var frameRateCap: Double = 60
     private var liveTimer: DispatchSourceTimer?
     private var lastLive: LiveDeviceValues?
@@ -88,9 +100,6 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
             previewLock.unlock()
         }
     }
-
-    /// Optional development step for each capture (Slice 3 Edition). Set on the main thread.
-    var developProvider: (() -> ((CaptureItem) throws -> CaptureItem)?)?
 
     init(catalog: DeviceCatalog = DeviceCatalog(), pipeline: FramePipeline = FramePipeline(), fileStore: CaptureFileStore = CaptureFileStore()) {
         self.catalog = catalog
@@ -142,10 +151,10 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
 
     // MARK: - Lifecycle
 
-    func start(lens: LensOption?, rawEnabled: Bool) {
+    func start(lens: LensOption?, format: CaptureFormat) {
         sessionQueue.async { [weak self] in
             guard let self else { return }
-            self.rawRequested = rawEnabled
+            self.preparedFormat = format
             self.wantsRunning = true
             if !self.isConfigured {
                 self.configureSession(initialLens: lens ?? self.catalog.defaultLens)
@@ -248,6 +257,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         configurePhotoOutput(for: device)
         configureVideoConnection(for: lens)
         session.commitConfiguration()
+        verifyPhotoOutput(for: device)
 
         configureFrameRate(for: device)
         let readiness = AVCapturePhotoOutputReadinessCoordinator(photoOutput: photoOutput)
@@ -280,6 +290,20 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         proRAW=\(self.photoOutput.isAppleProRAWEnabled) zsl=\(self.photoOutput.isZeroShutterLagEnabled) \
         responsive=\(self.photoOutput.isResponsiveCaptureEnabled) fast=\(self.photoOutput.isFastCapturePrioritizationEnabled)
         """)
+    }
+
+    /// Support flags (ProRAW, ZSL, responsive capture) are only final once the configuration is
+    /// committed. If ProRAW became available after the commit, enable it now; otherwise RAW
+    /// captures would silently fall back to Bayer RAW or HEIF.
+    private func verifyPhotoOutput(for device: AVCaptureDevice) {
+        let needsProRAW = photoOutput.isAppleProRAWSupported && !photoOutput.isAppleProRAWEnabled
+        let largest = device.activeFormat.supportedMaxPhotoDimensions.max(by: { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) })
+        let needsDimensions = largest.map { $0.width != photoOutput.maxPhotoDimensions.width || $0.height != photoOutput.maxPhotoDimensions.height } ?? false
+        guard needsProRAW || needsDimensions else { return }
+        session.beginConfiguration()
+        configurePhotoOutput(for: device)
+        session.commitConfiguration()
+        logger.info("Photo output re-configured after commit (proRAW=\(self.photoOutput.isAppleProRAWEnabled))")
     }
 
     /// The video data output stays unrotated (the shaders rotate); mirroring is off so the
@@ -448,6 +472,7 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         configurePhotoOutput(for: device)
         configureVideoConnection(for: lens)
         session.commitConfiguration()
+        verifyPhotoOutput(for: device)
         configureFrameRate(for: device)
 
         // 4. Re-apply the user's settings, clamped to the new lens (5 happens on the first frame).
@@ -460,10 +485,11 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
 
     // MARK: - RAW and thermal
 
-    func setRawEnabled(_ enabled: Bool) {
+    /// Re-prepares the photo settings for the format the user now shoots.
+    func setCaptureFormat(_ format: CaptureFormat) {
         sessionQueue.async { [weak self] in
-            guard let self, self.rawRequested != enabled else { return }
-            self.rawRequested = enabled
+            guard let self, self.preparedFormat != format else { return }
+            self.preparedFormat = format
             self.preparePhotoSettings()
         }
     }
@@ -501,21 +527,32 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         processedCodec == .hevc ? "public.heic" : "public.jpeg"
     }
 
-    private func makePhotoSettings(raw: Bool, customExposure: Bool) -> (settings: AVCapturePhotoSettings, isRaw: Bool) {
+    /// Builds the settings for one shot (§7, F5, F6).
+    /// - `.heif`: processed only. `.raw`: DNG only, with an embedded preview for thumbnails.
+    /// - `.rawPlusHEIF`: both, saved as one RAW+HEIF pair.
+    /// Falls back to HEIF when the lens has no RAW format.
+    private func makePhotoSettings(format requested: CaptureFormat, customExposure: Bool) -> (settings: AVCapturePhotoSettings, format: CaptureFormat) {
         let codec = processedCodec
         let settings: AVCapturePhotoSettings
-        var isRaw = false
-        if raw, let rawFormat = rawPixelFormat() {
-            settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat, processedFormat: [AVVideoCodecKey: codec])
-            isRaw = true
+        var format = requested
+        if format.includesRaw, let rawFormat = rawPixelFormat() {
+            if format == .raw {
+                settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat)
+                if settings.availableRawEmbeddedThumbnailPhotoCodecTypes.contains(.jpeg) {
+                    settings.rawEmbeddedThumbnailPhotoFormat = [AVVideoCodecKey: AVVideoCodecType.jpeg]
+                }
+            } else {
+                settings = AVCapturePhotoSettings(rawPixelFormatType: rawFormat, processedFormat: [AVVideoCodecKey: codec])
+            }
         } else {
+            format = .heif
             settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: codec])
         }
         settings.maxPhotoDimensions = photoOutput.maxPhotoDimensions
 
         // F6: locked manual exposure is only honoured with `.speed`.
         var priority: AVCapturePhotoOutput.QualityPrioritization = customExposure ? .speed : .balanced
-        if isRaw, AVCapturePhotoOutput.isBayerRAWPixelFormat(settings.rawPhotoPixelFormatType) {
+        if format.includesRaw, AVCapturePhotoOutput.isBayerRAWPixelFormat(settings.rawPhotoPixelFormatType) {
             // Bayer RAW is a single unfused frame.
             priority = .speed
         }
@@ -523,15 +560,18 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
             priority = photoOutput.maxPhotoQualityPrioritization
         }
         settings.photoQualityPrioritization = priority
-        return (settings, isRaw)
+        return (settings, format)
     }
 
     private func preparePhotoSettings() {
         guard session.outputs.contains(photoOutput) else { return }
         let custom = deviceController.exposureState?.isLocked ?? false
-        var templates = [makePhotoSettings(raw: false, customExposure: custom).settings]
-        if rawPixelFormat() != nil {
-            templates.insert(makePhotoSettings(raw: true, customExposure: custom).settings, at: 0)
+        var templates: [AVCapturePhotoSettings] = []
+        // The format in use goes first; the others are prepared too so switching is instant.
+        let order = [preparedFormat] + CaptureFormat.allCases.filter { $0 != preparedFormat }
+        for format in order {
+            let (settings, actual) = makePhotoSettings(format: format, customExposure: custom)
+            if actual == format { templates.append(settings) }
         }
         photoOutput.setPreparedPhotoSettingsArray(templates) { [weak self] prepared, error in
             if let error {
@@ -544,22 +584,37 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
 
     // MARK: - Capture (§6.3)
 
-    /// - Parameters:
-    ///   - raw: Whether to include the DNG (already combined with storage and support checks).
-    ///   - pressTime: `systemUptime` at the shutter press, for latency logging.
-    func capture(raw: Bool, pressTime: TimeInterval) {
+    /// One shutter press.
+    struct CaptureRequest {
+        /// What to save (already combined with RAW support and the storage policy).
+        var format: CaptureFormat
+        /// `systemUptime` at the shutter press, for latency logging.
+        var pressTime: TimeInterval
+        /// Edition: develop the shot before saving (Slice 3 §6). The engine then always captures RAW
+        /// when it can and keeps the DNG only if `format` includes RAW.
+        var develop: ((CaptureItem) throws -> CaptureItem)?
+        /// Called at `willBeginCapture` (Edition leaf-shutter sound).
+        var onWillBeginCapture: (() -> Void)?
+    }
+
+    func capture(_ request: CaptureRequest) {
         sessionQueue.async { [weak self] in
-            self?.performCapture(raw: raw, pressTime: pressTime)
+            self?.performCapture(request)
         }
     }
 
-    private func performCapture(raw: Bool, pressTime: TimeInterval) {
+    private func performCapture(_ request: CaptureRequest) {
         guard isConfigured, session.isRunning, session.outputs.contains(photoOutput) else { return }
         // Apply any slider movement still waiting in the coalescer before the exposure starts.
         deviceController.flushNow()
 
         let custom = deviceController.exposureState?.isLocked ?? false
-        let (settings, isRaw) = makePhotoSettings(raw: raw, customExposure: custom)
+        let isEdition = request.develop != nil
+        // The Edition develops from RAW whenever the lens has a RAW format (Slice 3 §6).
+        let captureFormat: CaptureFormat = isEdition ? .raw : request.format
+        let (settings, actualFormat) = makePhotoSettings(format: captureFormat, customExposure: custom)
+        let keepRaw = request.format.includesRaw
+        let pressTime = request.pressTime
 
         if let connection = photoOutput.connection(with: .video) {
             let angle = rotation.captureAngle
@@ -570,29 +625,49 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
 
         let processor = PhotoCaptureProcessor(
             uniqueID: settings.uniqueID,
-            expectsRaw: isRaw,
+            expectsRaw: actualFormat.includesRaw,
             processedType: processedTypeIdentifier,
             pressTime: pressTime,
             saver: saver,
             store: fileStore
         )
-        processor.develop = developProvider?()
+        if let develop = request.develop {
+            // Develops run one at a time off the session and delegate queues, so a burst never
+            // holds the camera or fights for memory with a second 48 MP develop.
+            processor.developQueue = developQueue
+            processor.develop = { item in
+                var developed = try develop(item)
+                if !keepRaw, let rawURL = developed.rawFileURL {
+                    // The DNG was only needed to develop from.
+                    try? FileManager.default.removeItem(at: rawURL)
+                    developed.rawFileURL = nil
+                }
+                return developed
+            }
+        }
+        let rawThumbnail = ThumbnailBox()
+        processor.onRawFileWritten = { url in
+            rawThumbnail.image = ThumbnailMaker.thumbnail(fromFileURL: url)
+        }
         processor.onWillCapture = { [weak self] in
             let latency = (ProcessInfo.processInfo.systemUptime - pressTime) * 1000
-            self?.logger.info("Press→willCapture \(latency, format: .fixed(precision: 1)) ms (raw=\(isRaw))")
+            self?.logger.info("Press→willCapture \(latency, format: .fixed(precision: 1)) ms (\(actualFormat.label, privacy: .public))")
             self?.post(.willCapture(latencyMS: latency))
         }
         processor.onFinish = { [weak self] finished, outcome in
             guard let self else { return }
             var thumbnail: UIImage?
-            if case .saved(_, let source, _) = outcome, let source {
-                thumbnail = ThumbnailMaker.thumbnail(from: source)
+            if case .saved(_, let source, _) = outcome {
+                if let source { thumbnail = ThumbnailMaker.thumbnail(from: source) }
+                if thumbnail == nil { thumbnail = rawThumbnail.image }
             }
             self.post(.captureFinished(outcome, thumbnail: thumbnail))
             let uniqueID = finished.uniqueID
             self.sessionQueue.async {
                 // Leak guard: removed on every path.
                 self.delegates[uniqueID] = nil
+                self.developingCount = self.delegates.count
+                self.post(.inFlight(self.delegates.count))
                 if case .savePending = outcome {
                     self.post(.pendingSaves(self.fileStore.pendingItems().count))
                 }
@@ -600,7 +675,10 @@ final class CaptureEngine: NSObject, @unchecked Sendable {
         }
 
         let delegate = PhotoCaptureDelegate(processor: processor)
+        delegate.onWillBeginCapture = request.onWillBeginCapture
         delegates[settings.uniqueID] = delegate
+        developingCount = delegates.count
+        post(.inFlight(delegates.count))
         readinessCoordinator?.startTrackingCaptureRequest(using: settings)
         post(.captureStarted)
         photoOutput.capturePhoto(with: settings, delegate: delegate)

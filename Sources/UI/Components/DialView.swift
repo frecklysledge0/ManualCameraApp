@@ -85,21 +85,31 @@ struct DialView: View {
                         )
                 }
 
-                // Centre index.
-                Rectangle()
-                    .fill(theme.emphasis)
-                    .frame(width: 2, height: theme.dial == .rotary ? 18 : 26)
-                    .frame(maxHeight: .infinity, alignment: theme.dial == .rotary ? .top : .center)
-                    .allowsHitTesting(false)
+                // Centre index, aligned with the ticks (which hang from the top edge).
+                VStack(spacing: 0) {
+                    DialIndexMarker(color: theme.selection)
+                        .frame(width: 9, height: 5)
+                    Rectangle()
+                        .fill(theme.selection)
+                        .frame(width: 2, height: theme.dial == .rotary ? 14 : 18)
+                }
+                .frame(maxHeight: .infinity, alignment: .top)
+                .padding(.top, 1)
+                .allowsHitTesting(false)
 
                 if isAuto {
+                    // Below the labels so it never covers the index or the selected value.
                     Text("AUTO")
                         .font(theme.labelFont.weight(.bold))
-                        .foregroundColor(theme.emphasis)
-                        .padding(.horizontal, 6)
+                        .tracking(theme.labelTracking)
+                        .foregroundColor(theme.emphasisByInversion ? theme.background : theme.selection)
+                        .padding(.horizontal, 7)
                         .padding(.vertical, 2)
-                        .background(theme.background.opacity(0.7), in: Capsule())
-                        .frame(maxHeight: .infinity, alignment: .top)
+                        .background(
+                            theme.emphasisByInversion ? theme.text : theme.background.opacity(0.75),
+                            in: RoundedRectangle(cornerRadius: theme.badgeCornerRadius)
+                        )
+                        .frame(maxHeight: .infinity, alignment: .bottom)
                         .allowsHitTesting(false)
                 }
             }
@@ -216,6 +226,22 @@ struct DialView: View {
     }
 }
 
+/// A small downward-pointing triangle above the dial's index line.
+private struct DialIndexMarker: View {
+    let color: Color
+
+    var body: some View {
+        Canvas { context, size in
+            var path = Path()
+            path.move(to: .zero)
+            path.addLine(to: CGPoint(x: size.width, y: 0))
+            path.addLine(to: CGPoint(x: size.width / 2, y: size.height))
+            path.closeSubpath()
+            context.fill(path, with: .color(color))
+        }
+    }
+}
+
 /// All ticks and labels, drawn once. `Equatable` so turning the dial only moves it.
 struct DialStrip: View, Equatable {
     let stops: [DialStop]
@@ -232,17 +258,16 @@ struct DialStrip: View, Equatable {
         GeometryReader { geometry in
             let inset = geometry.size.width - CGFloat(max(stops.count - 1, 0)) * spacing
             let leading = inset / 2
-            let height = geometry.size.height
             Canvas { context, size in
                 for (index, stop) in stops.enumerated() {
                     let x = leading + CGFloat(index) * spacing
-                    let tickTop = min(height * 0.12, 8)
+                    let tickTop: CGFloat = 6
                     let tickHeight: CGFloat = stop.isMajor ? 14 : 7
                     let rect = CGRect(x: x - 0.5, y: tickTop, width: 1, height: tickHeight)
                     context.fill(Path(rect), with: .color(stop.isMajor ? text : secondary.opacity(0.6)))
                     if let label = stop.label {
                         let resolved = context.resolve(Text(label).font(font).foregroundColor(text))
-                        context.draw(resolved, at: CGPoint(x: x, y: tickTop + 14 + 4), anchor: .top)
+                        context.draw(resolved, at: CGPoint(x: x, y: tickTop + 14 + 5), anchor: .top)
                     }
                 }
             }

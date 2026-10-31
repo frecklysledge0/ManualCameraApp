@@ -26,6 +26,7 @@ struct Banner: Equatable, Identifiable, Sendable {
         case sessionFailed
         case thermal
         case noCamera
+        case edition
     }
 
     var kind: Kind
@@ -43,12 +44,15 @@ struct Banner: Equatable, Identifiable, Sendable {
     }
 }
 
-/// Where the tap-to-focus box is drawn (view points). `id` changes on every tap to restart its animation.
-struct FocusIndicator: Equatable, Sendable {
-    var point: CGPoint
-    var id: Int
-    /// AF-S confirmation: the frame turns to the emphasis colour (Slice 2 §8).
-    var locked = false
+/// The focus frame's state. Like an Alpha body's centre area: the frame always shows where the
+/// camera focuses, turns to the confirmation colour when focus is achieved, and is hidden in MF.
+enum FocusFrameState: Equatable, Sendable {
+    /// Showing the AF point.
+    case idle
+    /// The lens is moving (AF-S after a half-press / tap, or AF-C re-acquiring).
+    case searching
+    /// Focus achieved (AF-S lock or AF-C settled).
+    case locked
 }
 
 /// Capture and session status for the HUD.
@@ -69,7 +73,11 @@ final class CaptureStatus {
     var flashCounter = 0
     var viewfinder = ViewfinderGeometry.zero
     var pendingSaveCount = 0
-    var focusIndicator: FocusIndicator?
+    /// Focus point in video uv (0…1 within the viewfinder image); nil = centre.
+    var focusPointUV: CGPoint?
+    var focusState: FocusFrameState = .idle
+    /// Increments on every tap so the frame replays its "acquire" animation.
+    var focusTapID = 0
     var isLoupeVisible = false
     private(set) var banners: [Banner] = []
 

@@ -191,3 +191,111 @@ kernel void loupeKernel(texture2d<float, access::sample> luma [[texture(0)]],
     }
     output.write(float4(rgb, 1.0f), gid);
 }
+
+// MARK: - MF Natural Colour (Slice 3 §6–7). The preview and the still share these functions and
+// the same LUT, so both use identical numbers.
+
+struct LookParams {
+    float shaperMax;       // LookConstants.shaperMaxLinear
+    float shaperInvExp;    // 1 / LookConstants.shaperExponent
+    float lutSize;
+    float grainAmplitude;  // 0 = no grain
+    float grainScale;      // output pixels per noise texel
+    float padding0;
+    float2 origin;         // tile origin in image pixels (still) or 0 (preview)
+    float4 octaveWeights;  // xyz used
+    float2 offset0;        // per-photo seed offsets (texture uv)
+    float2 offset1;
+    float2 offset2;
+    float2 padding1;
+};
+
+struct PreviewParams {
+    uint quarterTurns;
+    uint mirrored;
+    uint sourceIsP3;       // 1 when the video frames are Display P3
+    uint padding;
+};
+
+inline float3 srgbToLinear(float3 c) {
+    return select(pow((c + 0.055f) / 1.055f, float3(2.4f)), c / 12.92f, c <= 0.04045f);
+}
+
+inline float3 linearToSRGB(float3 c) {
+    c = clamp(c, float3(0.0f), float3(1.0f));
+    return select(1.055f * pow(c, float3(1.0f / 2.4f)) - 0.055f, c * 12.92f, c <= 0.0031308f);
+}
+
+// Linear Display P3 in → display-linear Display P3 out (colour, skin, tone baked in the LUT).
+inline float3 applyLook(float3 linearP3, texture3d<float, access::sample> lut, constant LookParams& p) {
+    constexpr sampler lutSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float3 shaped = pow(clamp(linearP3 / p.shaperMax, float3(0.0f), float3(1.0f)), float3(p.shaperInvExp));
+    float3 coord = shaped * ((p.lutSize - 1.0f) / p.lutSize) + 0.5f / p.lutSize;
+    return lut.sample(lutSampler, coord).rgb;
+}
+
+// Monochromatic, luminance-weighted grain from a tiled blue-noise texture at three octaves.
+inline float3 applyGrain(float3 rgb, float2 pixel, texture2d<float, access::sample> noise, constant LookParams& p) {
+    if (p.grainAmplitude <= 0.0f) {
+        return rgb;
+    }
+    constexpr sampler noiseSampler(coord::normalized, address::repeat, filter::linear);
+    float texels = float(noise.get_width());
+    float2 base = pixel / (p.grainScale * texels);
+    float n = p.octaveWeights.x * (noise.sample(noiseSampler, base + p.offset0).r - 0.5f)
+            + p.octaveWeights.y * (noise.sample(noiseSampler, base * 0.5f + p.offset1).r - 0.5f)
+            + p.octaveWeights.z * (noise.sample(noiseSampler, base * 0.25f + p.offset2).r - 0.5f);
+    n *= 2.0f;
+    float luminance = dot(rgb, float3(0.2289746f, 0.6917385f, 0.0792869f));
+    float perceptual = pow(clamp(luminance, 0.0f, 1.0f), 1.0f / 3.0f);
+    // Peaks in the midtones, falls off in the highlights and deep shadows.
+    float weight = clamp(4.0f * perceptual * (1.0f - perceptual), 0.0f, 1.0f);
+    return max(rgb * (1.0f + p.grainAmplitude * weight * n), float3(0.0f));
+}
+
+// The developed still: linear P3 tile in, look + grain applied, linear P3 out (CIImageProcessorKernel).
+kernel void lookStillKernel(texture2d<float, access::read> input [[texture(0)]],
+                            texture2d<float, access::write> output [[texture(1)]],
+                            texture3d<float, access::sample> lut [[texture(2)]],
+                            texture2d<float, access::sample> noise [[texture(3)]],
+                            constant LookParams& p [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= output.get_width() || gid.y >= output.get_height()) {
+        return;
+    }
+    float4 source = input.read(gid);
+    float3 rgb = applyLook(max(source.rgb, float3(0.0f)), lut, p);
+    rgb = applyGrain(rgb, p.origin + float2(gid), noise, p);
+    output.write(float4(rgb, source.a), gid);
+}
+
+// The Edition's live viewfinder: video frame → look → display (Slice 3 §7).
+kernel void lookPreviewKernel(texture2d<float, access::sample> luma [[texture(0)]],
+                              texture2d<float, access::sample> chroma [[texture(1)]],
+                              texture2d<float, access::write> output [[texture(2)]],
+                              texture3d<float, access::sample> lut [[texture(3)]],
+                              texture2d<float, access::sample> noise [[texture(4)]],
+                              constant LookParams& look [[buffer(0)]],
+                              constant PreviewParams& p [[buffer(1)]],
+                              uint2 gid [[thread_position_in_grid]]) {
+    uint width = output.get_width();
+    uint height = output.get_height();
+    if (gid.x >= width || gid.y >= height) {
+        return;
+    }
+    constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 uv = (float2(gid) + 0.5f) / float2(width, height);
+    float2 b = bufferUV(uv, p.quarterTurns, p.mirrored);
+    float3 encoded = ycbcrToRGB(luma.sample(s, b).r, chroma.sample(s, b).rg);
+    float3 linearRGB = srgbToLinear(encoded);
+    if (p.sourceIsP3 == 0) {
+        // BT.709 / sRGB primaries → Display P3.
+        const float3x3 toP3 = float3x3(float3(0.8225f, 0.0332f, 0.0171f),
+                                       float3(0.1774f, 0.9669f, 0.0724f),
+                                       float3(0.0000f, 0.0000f, 0.9108f));
+        linearRGB = toP3 * linearRGB;
+    }
+    float3 rgb = applyLook(linearRGB, lut, look);
+    rgb = applyGrain(rgb, float2(gid), noise, look);
+    output.write(float4(linearToSRGB(rgb), 1.0f), gid);
+}

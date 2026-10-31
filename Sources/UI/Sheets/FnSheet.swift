@@ -10,6 +10,45 @@ struct FnSheet: View {
         let overlays = settings.overlays
         NavigationStack {
             Form {
+                Section {
+                    Toggle(Branding.editionName, isOn: Binding(get: { settings.isEdition }, set: { controller.setEdition($0) }))
+                    if settings.isEdition {
+                        Picker("Framing", selection: Binding(get: { settings.framing }, set: { controller.setFraming($0) })) {
+                            ForEach(FramingMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        Picker("Grain", selection: Binding(get: { settings.grain }, set: { controller.setGrain($0) })) {
+                            ForEach(GrainLevel.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        Picker("Shutter sound", selection: Binding(get: { settings.shutterSound }, set: { controller.setShutterSound($0) })) {
+                            ForEach(ShutterSoundVolume.allCases, id: \.self) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        Toggle("Grain in viewfinder", isOn: Binding(get: { settings.previewGrain }, set: { controller.setPreviewGrain($0) }))
+                    }
+                } header: {
+                    Text(Branding.editionShortName)
+                } footer: {
+                    Text(settings.isEdition
+                         ? "Every photo is developed from RAW in \(Branding.lookName). 1:1 and XPAN crop the developed photo; a kept RAW stays full-frame. The shutter sound follows the silent switch."
+                         : "A calm, monochrome interface with \(Branding.lookName), framing and grain.")
+                }
+
+                if settings.isEdition {
+                    Section("White balance") {
+                        Picker("White balance", selection: Binding(get: { settings.whiteBalance }, set: { controller.setWhiteBalance($0) })) {
+                            Text("Auto").tag(WhiteBalanceStop.auto)
+                            ForEach(WhiteBalancePreset.allCases, id: \.self) { preset in
+                                Text(preset.label).tag(WhiteBalanceStop.preset(preset))
+                            }
+                            if case .kelvin(let kelvin) = settings.whiteBalance {
+                                Text("\(kelvin)K").tag(WhiteBalanceStop.kelvin(kelvin))
+                            }
+                        }
+                    }
+                }
+
                 Section("Focus") {
                     Picker("Focus mode", selection: Binding(get: { settings.focusMode }, set: { controller.setFocusMode($0) })) {
                         ForEach(FocusMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -48,8 +87,16 @@ struct FnSheet: View {
                 }
 
                 Section("Capture") {
-                    Toggle("RAW + HEIF", isOn: Binding(get: { settings.rawEnabled }, set: { _ in controller.toggleRaw() }))
-                        .disabled(!settings.rawSupported)
+                    Picker("Format", selection: Binding(get: { settings.captureFormat }, set: { controller.setCaptureFormat($0) })) {
+                        ForEach(CaptureFormat.allCases, id: \.self) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(!settings.rawSupported)
+                    if !settings.rawSupported {
+                        Text("This lens has no RAW format; photos are saved as HEIF.")
+                            .font(.footnote)
+                            .foregroundColor(theme.secondaryText)
+                    }
                     if settings.rawSuppressedForStorage {
                         Text("RAW is paused: less than 150 MB free.")
                             .font(.footnote)
@@ -70,12 +117,11 @@ struct FnSheet: View {
                     .disabled(!settings.haptics.enabled)
                 }
 
-                Section {
-                    Toggle(Branding.editionName, isOn: .constant(false))
-                        .disabled(true)
-                } footer: {
-                    Text("Coming in the next update.")
+                #if DEBUG
+                Section("Developer") {
+                    Toggle("Performance HUD", isOn: Binding(get: { settings.showPerformanceHUD }, set: { controller.setShowPerformanceHUD($0) }))
                 }
+                #endif
             }
             .navigationTitle("Fn")
             .navigationBarTitleDisplayMode(.inline)
@@ -85,7 +131,7 @@ struct FnSheet: View {
                 }
             }
         }
-        .tint(theme.accent)
+        .tint(theme.selection)
         .preferredColorScheme(.dark)
     }
 }

@@ -3,6 +3,7 @@ import Foundation
 import Metal
 import Photos
 import QuartzCore
+import SwiftUI
 import UIKit
 
 /// Runs `body` on the main actor: immediately when already on the main thread, otherwise on the
@@ -33,7 +34,6 @@ final class CameraController {
     private let defaults: UserDefaults
     private weak var previewView: PreviewView?
     private var notificationTokens: [NSObjectProtocol] = []
-    private var focusTapCounter = 0
     private var hasStarted = false
     private var expectingLensSwitchHaptic = false
 
@@ -45,6 +45,8 @@ final class CameraController {
     private var awaitingFocusLock = false
     private var sawFocusAdjusting = false
     private var focusLockWorkItem: DispatchWorkItem?
+    /// Returns the focus frame from `locked` to `idle` after the confirmation has been seen.
+    private var focusStateWorkItem: DispatchWorkItem?
     private var peakDetector = SharpnessPeakDetector()
     private var isPullingFocus = false
     private var loupeCloseWorkItem: DispatchWorkItem?
@@ -56,6 +58,15 @@ final class CameraController {
 
     // Level
     private var levelIndicator = LevelIndicator()
+
+    // Medium Format Edition (Slice 3)
+    private let shutterSound = ShutterSoundPlayer()
+    private var editionRenderer: EditionPreviewRenderer?
+    private var editionDeveloper: EditionDeveloper?
+    /// Ignores a look-resource load that finishes after the Edition was turned off again.
+    private var editionGeneration = 0
+    /// At most this many Edition shots wait for their develop before the shutter holds (Slice 3 §6).
+    static let maxEditionInFlight = 3
 
     // Shots left
     private var freeBytes: Int64?
@@ -189,7 +200,7 @@ final class CameraController {
             status.show(Banner(kind: .noCamera, message: "No camera found on this device.", action: .none))
             return
         }
-        engine.start(lens: settings.lens, rawEnabled: settings.effectiveRaw)
+        engine.start(lens: settings.lens, format: settings.captureFormat)
         updateMotionSampling()
         checkPhotosAccess(request: true)
         checkStorage()
@@ -234,12 +245,19 @@ final class CameraController {
             guard let self else { return }
             MainActor.assumeIsolated { self.toggleLoupeZoom() }
         }
+        view.onLongPress = { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated { self.resetFocusPoint() }
+        }
         view.onGeometryChange = { [weak self] geometry in
             guard let self else { return }
             MainActor.assumeIsolated {
                 self.status.viewfinder = geometry
                 self.updateLoupeWindow()
             }
+        }
+        if settings.isEdition {
+            startEditionPipeline(animated: false)
         }
     }
 
@@ -405,10 +423,15 @@ final class CameraController {
     func setFocusMode(_ mode: FocusMode) {
         guard mode != settings.focusMode else { return }
         settings.focusMode = mode
+        awaitingFocusLock = false
+        focusLockWorkItem?.cancel()
+        focusStateWorkItem?.cancel()
+        status.focusState = .idle
         switch mode {
         case .continuous:
             engine.send(.focus(.continuousAuto(point: nil)))
         case .single:
+            beginFocusLock()
             engine.send(.focus(.singleAuto(point: nil)))
         case .manual:
             let position = telemetry.liveLensPosition > 0 ? telemetry.liveLensPosition : settings.lensPosition
@@ -420,7 +443,8 @@ final class CameraController {
     }
 
     /// Tap on the viewfinder: AF-S focuses once and confirms, AF-C tracks the point, MF only moves
-    /// the loupe / focus-snap region. In P/A/S the tap also meters there.
+    /// the loupe / focus-snap region. In P/A/S the tap also meters there. The focus frame then
+    /// stays at that point (like an Alpha body's flexible spot) until a long-press re-centres it.
     func focus(atViewPoint point: CGPoint, devicePoint: CGPoint) {
         if settings.activeTile != nil || settings.showFnSheet {
             // A tap on the viewfinder first dismisses the tray (Slice 2 §4).
@@ -428,36 +452,51 @@ final class CameraController {
             settings.showFnSheet = false
             return
         }
-        if let uv = status.viewfinder.normalizedPoint(for: point) {
-            focusPointUV = uv
-            updateFocusRegion()
-        }
+        guard let uv = status.viewfinder.normalizedPoint(for: point) else { return }
+        focusPointUV = uv
+        updateFocusRegion()
+        status.focusPointUV = uv
+        status.focusTapID += 1
+        focus(devicePoint: devicePoint)
+    }
+
+    /// Long-press on the viewfinder: the focus point returns to the centre (Sony's "Centre" area).
+    func resetFocusPoint() {
+        settings.activeTile = nil
+        let center = CGPoint(x: 0.5, y: 0.5)
+        focusPointUV = center
+        updateFocusRegion()
+        status.focusPointUV = nil
+        status.focusTapID += 1
+        // The centre of the frame is the centre in device coordinates too, in every orientation.
+        focus(devicePoint: center)
+        haptics.play(.detent)
+    }
+
+    private func focus(devicePoint: CGPoint) {
+        focusStateWorkItem?.cancel()
         switch settings.focusMode {
         case .single:
-            awaitingFocusLock = true
-            sawFocusAdjusting = false
+            beginFocusLock()
             engine.send(.focus(.singleAuto(point: devicePoint)))
-            scheduleFocusLockFallback()
         case .continuous:
+            status.focusState = .searching
             engine.send(.focus(.continuousAuto(point: devicePoint)))
+            // If the lens is already sharp it may never report adjusting: settle anyway.
+            scheduleFocusState(.idle, after: 0.8, onlyIf: .searching)
         case .manual:
-            break
+            status.focusState = .idle
         }
         if settings.program != .manual || settings.exposure.isoAuto {
             engine.send(.exposurePoint(devicePoint))
         }
-        focusTapCounter += 1
-        status.focusIndicator = FocusIndicator(point: status.viewfinder.clampedToVideo(point), id: focusTapCounter)
-        let tapID = focusTapCounter
-        let hold: TimeInterval = settings.focusMode == .single ? 2.0 : 1.0
-        DispatchQueue.main.asyncAfter(deadline: .now() + hold) { [weak self] in
-            guard let self else { return }
-            MainActor.assumeIsolated {
-                if self.status.focusIndicator?.id == tapID {
-                    self.status.focusIndicator = nil
-                }
-            }
-        }
+    }
+
+    private func beginFocusLock() {
+        awaitingFocusLock = true
+        sawFocusAdjusting = false
+        status.focusState = .searching
+        scheduleFocusLockFallback()
     }
 
     /// If the lens was already sharp, `isAdjustingFocus` may never go true: confirm anyway.
@@ -476,8 +515,33 @@ final class CameraController {
     private func confirmFocusLock() {
         awaitingFocusLock = false
         focusLockWorkItem?.cancel()
-        status.focusIndicator?.locked = true
+        status.focusState = .locked
         haptics.play(.focusLock)
+        scheduleFocusState(.idle, after: 1.5, onlyIf: .locked)
+    }
+
+    private func scheduleFocusState(_ state: FocusFrameState, after delay: TimeInterval, onlyIf current: FocusFrameState) {
+        focusStateWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                if self.status.focusState == current { self.status.focusState = state }
+            }
+        }
+        focusStateWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    /// AF-C: the frame shows `searching` while the lens moves and briefly confirms when it settles.
+    private func continuousFocusChanged(adjusting: Bool) {
+        guard settings.focusMode == .continuous else { return }
+        if adjusting {
+            focusStateWorkItem?.cancel()
+            status.focusState = .searching
+        } else if status.focusState == .searching {
+            status.focusState = .locked
+            scheduleFocusState(.idle, after: 0.6, onlyIf: .locked)
+        }
     }
 
     func mfWheelBegan() {
@@ -634,15 +698,23 @@ final class CameraController {
         settings.histogramExpanded.toggle()
     }
 
-    func toggleRaw() {
-        guard settings.rawSupported else {
+    func setCaptureFormat(_ format: CaptureFormat) {
+        if format.includesRaw && !settings.rawSupported {
             haptics.play(.limit)
             return
         }
-        settings.rawEnabled.toggle()
-        engine.setRawEnabled(settings.effectiveRaw)
+        settings.captureFormat = format
+        engine.setCaptureFormat(settings.effectiveFormat)
         updateShotsLeft()
         scheduleSave()
+    }
+
+    /// Cycles HEIF → RAW → RAW+HEIF (tap on the format badge).
+    func cycleCaptureFormat() {
+        let all = settings.rawSupported ? CaptureFormat.allCases : [.heif]
+        let index = all.firstIndex(of: settings.captureFormat) ?? 0
+        setCaptureFormat(all[(index + 1) % all.count])
+        haptics.play(.detent)
     }
 
     func setHapticsEnabled(_ enabled: Bool) {
@@ -657,6 +729,132 @@ final class CameraController {
         scheduleSave()
     }
 
+    // MARK: - Medium Format Edition (Slice 3)
+
+    /// One tap in the Fn sheet: the theme cross-dissolves (0.35 s), the live look fades in and the
+    /// shutter develops every shot through MF Natural Colour.
+    func setEdition(_ on: Bool) {
+        guard on != settings.isEdition else { return }
+        settings.activeTile = nil
+        withAnimation(.easeInOut(duration: 0.35)) {
+            settings.theme = on ? .edition : .alpha
+        }
+        if on {
+            startEditionPipeline(animated: true)
+        } else {
+            stopEditionPipeline()
+        }
+        haptics.play(.edition)
+        scheduleSave()
+    }
+
+    func setFraming(_ framing: FramingMode) {
+        guard framing != settings.framing else { return }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            settings.framing = framing
+        }
+        haptics.play(.detent)
+        scheduleSave()
+    }
+
+    /// 4:3 → 1:1 → XPAN (tap on the framing badge).
+    func cycleFraming() {
+        let all = FramingMode.allCases
+        let index = all.firstIndex(of: settings.framing) ?? 0
+        setFraming(all[(index + 1) % all.count])
+    }
+
+    func setGrain(_ grain: GrainLevel) {
+        settings.grain = grain
+        updatePreviewGrain()
+        scheduleSave()
+    }
+
+    func setShutterSound(_ volume: ShutterSoundVolume) {
+        settings.shutterSound = volume
+        let player = shutterSound
+        if settings.isEdition {
+            DispatchQueue.global(qos: .userInitiated).async {
+                player.prepare(volume: volume)
+            }
+        } else {
+            player.setVolume(volume)
+        }
+        scheduleSave()
+    }
+
+    func setPreviewGrain(_ enabled: Bool) {
+        settings.previewGrain = enabled
+        updatePreviewGrain()
+        scheduleSave()
+    }
+
+    func setShowPerformanceHUD(_ show: Bool) {
+        settings.showPerformanceHUD = show
+    }
+
+    private func updatePreviewGrain() {
+        let level: GrainLevel = settings.previewGrain ? settings.grain : .off
+        editionRenderer?.setGrain(level, iso: settings.exposure.iso)
+    }
+
+    /// Loads the LUT and grain off the main thread (first time only), then routes video frames
+    /// through the look and fades the look layer in.
+    private func startEditionPipeline(animated: Bool) {
+        guard let previewView else { return }
+        let renderer = editionRenderer ?? EditionPreviewRenderer(layer: previewView.lookView.metalLayer)
+        editionRenderer = renderer
+        renderer.setSourceIsP3(settings.limits.videoIsP3)
+        updatePreviewGrain()
+        editionGeneration += 1
+        let generation = editionGeneration
+        let volume = settings.shutterSound
+        let player = shutterSound
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ready = LookResources.shared.load()
+            player.prepare(volume: volume)
+            guard let self else { return }
+            runOnMain { self.editionResourcesLoaded(ready: ready, generation: generation, animated: animated) }
+        }
+    }
+
+    private func editionResourcesLoaded(ready: Bool, generation: Int, animated: Bool) {
+        guard generation == editionGeneration, settings.isEdition, let renderer = editionRenderer else { return }
+        guard ready else {
+            // The look can't run (missing resource or no Metal): stay on the Pro look.
+            status.show(Banner(kind: .edition, message: "\(Branding.lookName) couldn't be loaded.", action: .none))
+            withAnimation(.easeInOut(duration: 0.35)) { settings.theme = .alpha }
+            scheduleSave()
+            return
+        }
+        engine.pipeline.setFrameRenderer(Self.makeFrameRenderer(renderer))
+        previewView?.setLookVisible(true, animated: animated)
+    }
+
+    private func stopEditionPipeline() {
+        editionGeneration += 1
+        previewView?.setLookVisible(false)
+        // Keep drawing until the fade-out has finished, then stop paying for the look.
+        let generation = editionGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                guard generation == self.editionGeneration, !self.settings.isEdition else { return }
+                self.engine.pipeline.setFrameRenderer(nil)
+            }
+        }
+        let player = shutterSound
+        DispatchQueue.global(qos: .utility).async {
+            player.stop()
+        }
+    }
+
+    nonisolated private static func makeFrameRenderer(_ renderer: EditionPreviewRenderer) -> (MTLCommandBuffer, MTLTexture, MTLTexture, FramePipeline.Config) -> Void {
+        return { commandBuffer, luma, chroma, config in
+            renderer.render(commandBuffer: commandBuffer, luma: luma, chroma: chroma, quarterTurns: config.quarterTurns, mirrored: config.mirrored)
+        }
+    }
+
     // MARK: - Capture
 
     func shutterPressed() {
@@ -664,8 +862,46 @@ final class CameraController {
             haptics.play(.limit)
             return
         }
-        haptics.play(.shutterPress)
-        engine.capture(raw: settings.effectiveRaw, pressTime: ProcessInfo.processInfo.systemUptime)
+        let pressTime = ProcessInfo.processInfo.systemUptime
+        guard settings.isEdition else {
+            haptics.play(.shutterPress)
+            engine.capture(CaptureEngine.CaptureRequest(format: settings.effectiveFormat, pressTime: pressTime))
+            return
+        }
+        // Edition: each shot is developed (~1–2 s); hold the shutter while three are waiting.
+        guard status.inFlightCount < Self.maxEditionInFlight else {
+            haptics.play(.limit)
+            return
+        }
+        haptics.play(.leafShutter)
+        let developer = editionDeveloper ?? EditionDeveloper()
+        editionDeveloper = developer
+        let options = EditionDeveloper.Options(
+            framing: settings.framing,
+            grain: settings.grain,
+            iso: telemetry.liveISO > 0 ? telemetry.liveISO : settings.exposure.iso
+        )
+        engine.capture(CaptureEngine.CaptureRequest(
+            format: settings.effectiveFormat,
+            pressTime: pressTime,
+            develop: Self.makeDevelop(developer, options: options),
+            onWillBeginCapture: Self.makeSoundTrigger(shutterSound)
+        ))
+        // An instant thumbnail from the viewfinder; the developed one replaces it when saved.
+        engine.pipeline.makeSnapshot(maxDimension: 240, blurred: false) { [weak self] image in
+            guard let self, let image else { return }
+            let thumbnail = UIImage(cgImage: image)
+            runOnMain { self.status.lastThumbnail = thumbnail }
+        }
+    }
+
+    /// Built outside the main actor: these closures run on the develop and capture queues.
+    nonisolated private static func makeDevelop(_ developer: EditionDeveloper, options: EditionDeveloper.Options) -> (CaptureItem) throws -> CaptureItem {
+        return { item in try developer.develop(item, options: options) }
+    }
+
+    nonisolated private static func makeSoundTrigger(_ player: ShutterSoundPlayer) -> () -> Void {
+        return { player.play() }
     }
 
     func openGallery() {
@@ -719,7 +955,8 @@ final class CameraController {
             } else if settings.focusMode == .manual && telemetry.liveLensPosition <= 0 {
                 pendingManualFocusLock = true
             }
-            engine.setRawEnabled(settings.effectiveRaw)
+            engine.setCaptureFormat(settings.effectiveFormat)
+            editionRenderer?.setSourceIsP3(limits.videoIsP3)
             previewView?.refreshGeometry()
             updateShotsLeft()
             if expectingLensSwitchHaptic {
@@ -753,6 +990,8 @@ final class CameraController {
                 } else if sawFocusAdjusting {
                     confirmFocusLock()
                 }
+            } else {
+                continuousFocusChanged(adjusting: adjusting)
             }
 
         case .readiness(let ready):
@@ -782,10 +1021,12 @@ final class CameraController {
             telemetry.lastLatencyMS = latency
 
         case .captureStarted:
-            status.inFlightCount += 1
+            break
+
+        case .inFlight(let count):
+            status.inFlightCount = count
 
         case .captureFinished(let outcome, let thumbnail):
-            status.inFlightCount = max(0, status.inFlightCount - 1)
             switch outcome {
             case .saved(let destination, _, let bytes):
                 if let thumbnail { status.lastThumbnail = thumbnail }
@@ -945,7 +1186,7 @@ final class CameraController {
             status.show(Banner(kind: .criticalStorage, message: "Under 150 MB free: RAW is off until space is freed.", action: .none))
         }
         if wasSuppressed != settings.rawSuppressedForStorage {
-            engine.setRawEnabled(settings.effectiveRaw)
+            engine.setCaptureFormat(settings.effectiveFormat)
         }
         updateShotsLeft()
     }

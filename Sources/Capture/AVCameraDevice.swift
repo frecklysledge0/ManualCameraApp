@@ -36,6 +36,7 @@ final class AVCameraDevice: CameraDevice {
         limits.supportsExposurePointOfInterest = device.isExposurePointOfInterestSupported
         limits.aperture = device.lensAperture
         limits.exposure = ApertureSupport.capability(of: device)
+        limits.videoIsP3 = device.activeColorSpace == .P3_D65
         return limits
     }
 
@@ -149,7 +150,8 @@ final class AVCameraDevice: CameraDevice {
             if device.isFocusModeSupported(.continuousAutoFocus) {
                 device.focusMode = .continuousAutoFocus
             }
-            device.isSubjectAreaChangeMonitoringEnabled = point != nil
+            // The AF point stays where the user put it (Sony-style flexible spot); no auto-recentring.
+            device.isSubjectAreaChangeMonitoringEnabled = false
         case .singleAuto(let point):
             if let point, device.isFocusPointOfInterestSupported {
                 device.focusPointOfInterest = point

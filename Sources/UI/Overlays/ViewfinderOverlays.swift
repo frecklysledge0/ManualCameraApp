@@ -38,7 +38,7 @@ struct HorizonLineView: View {
   var body: some View {
     let roll = telemetry.rollDegrees
     Rectangle()
-      .fill(telemetry.rollIsLevel ? theme.emphasis : Color.white.opacity(0.6))
+      .fill(telemetry.rollIsLevel ? theme.confirmation : Color.white.opacity(0.6))
       .frame(width: 160, height: 1)
       .rotationEffect(.degrees(-roll))
       .allowsHitTesting(false)
@@ -79,6 +79,7 @@ struct SonyFocusReticleShape: Shape {
     path.addLine(to: CGPoint(x: x + w, y: y + h - len))
 
     // Center crosshair
+    guard crosshairLength > 0 else { return path }
     let mid = CGPoint(x: rect.midX, y: rect.midY)
     path.move(to: CGPoint(x: mid.x - crosshairLength, y: mid.y))
     path.addLine(to: CGPoint(x: mid.x + crosshairLength, y: mid.y))
@@ -89,44 +90,106 @@ struct SonyFocusReticleShape: Shape {
   }
 }
 
-/// Sony-style focus frame: stays at center in AF (like Sony Alpha Center Area),
-/// moves to tapped point on tap-to-focus, and turns bright emerald green when locked.
+/// The focus frame, like an Alpha body's flexible spot: it always shows where the camera focuses
+/// (the centre until you tap elsewhere; long-press returns it to the centre), turns to the
+/// confirmation colour when focus is achieved, and is hidden in MF, where the loupe takes over.
 struct FocusFrameView: View {
   let status: CaptureStatus
+  let focusMode: FocusMode
   @Environment(\.cameraTheme) var theme
+  @Environment(\.accessibilityReduceMotion) var reduceMotion
+  @State private var pop: CGFloat = 1
 
-  private let boxSize: CGFloat = 58
+  private let boxSize: CGFloat = 64
 
   var body: some View {
     GeometryReader { geometry in
-      let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
-      let point = status.focusIndicator?.point ?? center
-      let isLocked = status.focusIndicator?.locked ?? false
-      let isTapped = status.focusIndicator != nil
+      let point = Self.position(uv: status.focusPointUV, geometry: status.viewfinder, in: geometry.size)
+      let state = status.focusState
+      let locked = state == .locked
+      let color: Color = locked ? theme.confirmation : Color.white.opacity(state == .searching ? 1 : 0.82)
 
       ZStack {
-        // Subtle corner brackets + crosshair
-        SonyFocusReticleShape(cornerLength: 10, crosshairLength: isLocked ? 5 : 4)
-          .stroke(
-            isLocked ? theme.emphasis : Color.white.opacity(isTapped ? 0.95 : 0.70),
-            lineWidth: isLocked ? 2 : 1.25
-          )
-          .shadow(color: Color.black.opacity(0.4), radius: 1, x: 0, y: 1)
+        SonyFocusReticleShape(cornerLength: 12, crosshairLength: 0)
+          .stroke(color, style: StrokeStyle(lineWidth: locked ? 2.25 : 1.5, lineCap: .square))
+          .shadow(color: Color.black.opacity(0.45), radius: 1.5, x: 0, y: 0.5)
           .frame(width: boxSize, height: boxSize)
-
-        // When locked: subtle green confirmation border
-        if isLocked {
-          RoundedRectangle(cornerRadius: 2)
-            .stroke(theme.emphasis, lineWidth: 1.5)
-            .frame(width: boxSize - 4, height: boxSize - 4)
-            .transition(.scale.combined(with: .opacity))
-        }
+        // Centre dot: the AF point itself.
+        Circle()
+          .fill(color)
+          .frame(width: 3, height: 3)
+          .shadow(color: Color.black.opacity(0.45), radius: 1, x: 0, y: 0.5)
       }
+      .scaleEffect(pop)
       .position(point)
-      .animation(.spring(response: 0.25, dampingFraction: 0.75), value: point)
-      .animation(.easeOut(duration: 0.15), value: isLocked)
-      .allowsHitTesting(false)
+      .opacity(focusMode == .manual ? 0 : 1)
+      .animation(reduceMotion ? nil : .spring(response: 0.25, dampingFraction: 0.85), value: point)
+      .animation(.easeOut(duration: 0.15), value: state)
+      .animation(.easeOut(duration: 0.2), value: focusMode)
     }
+    .allowsHitTesting(false)
+    .accessibilityHidden(true)
+    .onChange(of: status.focusTapID) { _, _ in
+      guard !reduceMotion else { return }
+      var instant = Transaction()
+      instant.disablesAnimations = true
+      withTransaction(instant) { pop = 1.18 }
+      DispatchQueue.main.async {
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.72)) { pop = 1 }
+      }
+    }
+  }
+
+  /// The frame's centre in this view: the focus point mapped into the video rect, or the centre.
+  static func position(uv: CGPoint?, geometry: ViewfinderGeometry, in size: CGSize) -> CGPoint {
+    let video = geometry.videoRect.width > 0 && geometry.videoRect.height > 0
+      ? geometry.videoRect
+      : CGRect(origin: .zero, size: size)
+    guard let uv else { return CGPoint(x: video.midX, y: video.midY) }
+    return CGPoint(x: video.minX + uv.x * video.width, y: video.minY + uv.y * video.height)
+  }
+}
+
+/// Edition framing (Slice 3 §5): everything outside the 1:1 or XPAN frame is dimmed to 88% black,
+/// with a hairline on the frame edge. The developed photo is cropped to the same rect.
+struct FramingMatteView: View {
+  let framing: FramingMode
+  @Environment(\.cameraTheme) var theme
+
+  var body: some View {
+    GeometryReader { geometry in
+      let size = geometry.size
+      let crop = FramingMath.cropRect(for: framing, in: size)
+      ZStack {
+        MatteShape(hole: crop)
+          .fill(Color.black.opacity(0.88), style: FillStyle(eoFill: true))
+        Rectangle()
+          .stroke(theme.hairline, lineWidth: 1)
+          .frame(width: crop.width, height: crop.height)
+          .position(x: crop.midX, y: crop.midY)
+      }
+      .opacity(framing == .native ? 0 : 1)
+      .animation(.easeInOut(duration: 0.3), value: framing)
+    }
+    .allowsHitTesting(false)
+    .accessibilityHidden(true)
+  }
+}
+
+/// The full rect minus an animatable hole (even-odd fill), so the matte slides between framings.
+private struct MatteShape: Shape {
+  var hole: CGRect
+
+  var animatableData: AnimatablePair<AnimatablePair<CGFloat, CGFloat>, AnimatablePair<CGFloat, CGFloat>> {
+    get { AnimatablePair(AnimatablePair(hole.minX, hole.minY), AnimatablePair(hole.width, hole.height)) }
+    set { hole = CGRect(x: newValue.first.first, y: newValue.first.second, width: newValue.second.first, height: newValue.second.second) }
+  }
+
+  func path(in rect: CGRect) -> Path {
+    var path = Path()
+    path.addRect(rect)
+    path.addRect(hole)
+    return path
   }
 }
 
@@ -202,7 +265,7 @@ struct BannerStack: View {
           if let title = banner.actionTitle {
             Button(title) { onAction(banner) }
               .font(.system(size: 12, weight: .bold))
-              .foregroundColor(theme.emphasis)
+              .foregroundColor(theme.selection)
           }
         }
         .padding(.horizontal, 12)

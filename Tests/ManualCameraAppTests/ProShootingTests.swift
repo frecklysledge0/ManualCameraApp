@@ -306,13 +306,30 @@ final class ProShootingTests: XCTestCase {
         XCTAssertEqual(decoded.values(for: .shutterPriority).shutter, 1.0 / 1000)
     }
 
+    func testShootingProfileMigratesRawToggle() throws {
+        let off = try JSONDecoder().decode(ShootingProfile.self, from: Data(#"{"rawEnabled":false}"#.utf8))
+        XCTAssertEqual(off.captureFormat, .heif)
+        let on = try JSONDecoder().decode(ShootingProfile.self, from: Data(#"{"rawEnabled":true}"#.utf8))
+        XCTAssertEqual(on.captureFormat, .raw)
+        let explicit = try JSONDecoder().decode(ShootingProfile.self, from: Data(#"{"captureFormat":"rawPlusHEIF","rawEnabled":false}"#.utf8))
+        XCTAssertEqual(explicit.captureFormat, .rawPlusHEIF)
+    }
+
+    func testCaptureFormatFlags() {
+        XCTAssertFalse(CaptureFormat.heif.includesRaw)
+        XCTAssertTrue(CaptureFormat.raw.includesRaw)
+        XCTAssertFalse(CaptureFormat.raw.includesProcessed)
+        XCTAssertTrue(CaptureFormat.rawPlusHEIF.includesRaw)
+        XCTAssertTrue(CaptureFormat.rawPlusHEIF.includesProcessed)
+    }
+
     func testShootingProfileToleratesMissingKeys() throws {
         let data = Data(#"{"program":"M","focusMode":"AF-S"}"#.utf8)
         let decoded = try JSONDecoder().decode(ShootingProfile.self, from: data)
         XCTAssertEqual(decoded.program, .manual)
         XCTAssertEqual(decoded.focusMode, .single)
         XCTAssertEqual(decoded.overlays, OverlaySettings())
-        XCTAssertTrue(decoded.rawEnabled)
+        XCTAssertEqual(decoded.captureFormat, .raw)
     }
 
     func testShootingProfilePersistsInUserDefaults() throws {
@@ -321,7 +338,7 @@ final class ProShootingTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         XCTAssertEqual(ShootingProfile.load(from: defaults), ShootingProfile())
         defaults.set(false, forKey: "rawEnabled")
-        XCTAssertFalse(ShootingProfile.load(from: defaults).rawEnabled, "Slice 1 RAW toggle is carried over")
+        XCTAssertEqual(ShootingProfile.load(from: defaults).captureFormat, .heif, "Slice 1 RAW toggle is carried over")
         var profile = ShootingProfile()
         profile.program = .manual
         profile.save(to: defaults)

@@ -147,9 +147,9 @@ struct LensSelector: View {
                             Text(selected ? lens.buttonText + "×" : lens.buttonText)
                                 .font(theme.telemetryFont)
                                 .monospacedDigit()
-                                .foregroundColor(selected ? theme.emphasis : theme.secondaryText)
+                                .foregroundColor(selected ? (theme.emphasisByInversion ? theme.background : theme.selection) : theme.secondaryText)
                                 .frame(width: 34, height: 30)
-                                .background(selected ? theme.surfaceRaised : Color.clear, in: Capsule())
+                                .background(selected ? (theme.emphasisByInversion ? theme.text : theme.surfaceRaised) : Color.clear, in: Capsule())
                                 .rotatesWithDevice(controller.telemetry)
                         }
                         .buttonStyle(.plain)

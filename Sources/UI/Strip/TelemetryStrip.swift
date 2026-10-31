@@ -1,10 +1,11 @@
 import SwiftUI
 import UIKit
 
-/// The Sony Alpha-style status header above the 4:3 viewfinder:
-/// Mode badge · Focus mode · Format (RAW+HEIF / HEIF) · Aspect ratio · Shots left · Battery level,
-/// with the live histogram and two-axis level horizon below it.
-/// Note: Exposure parameters (SS, F, ISO, EV) belong exclusively in the interactive Fn bar at the bottom.
+/// The status area above the viewfinder. Every value appears in exactly one place on screen:
+/// - Pro theme (`.dense`): an Alpha-style status header (mode · AF · format · aspect · shots left ·
+///   battery) over the histogram and level. Exposure values live on the Fn bar below.
+/// - Edition (`.minimal`): the exposure values themselves, large and light, with a luma outline
+///   histogram and a hairline level. The Fn tiles below show only their names.
 struct TelemetryStrip: View {
   let controller: CameraController
   @Environment(\.cameraTheme) var theme
@@ -12,57 +13,86 @@ struct TelemetryStrip: View {
   var body: some View {
     let settings = controller.settings
     if settings.histogramExpanded {
-      HistogramView(telemetry: controller.telemetry, mode: settings.overlays.histogramMode)
+      HistogramView(telemetry: controller.telemetry, mode: theme.telemetry == .minimal ? .luma : settings.overlays.histogramMode)
         .padding(.horizontal, 12)
-        .padding(.vertical, 4)
+        .padding(.vertical, 6)
         .contentShape(Rectangle())
         .onTapGesture { controller.toggleHistogramExpanded() }
+        .accessibilityHint("Double-tap to collapse the histogram.")
     } else {
-      VStack(spacing: 4) {
-        // Top row: Sony Alpha status information (no duplicated exposure controls)
-        HStack(spacing: 8) {
-          BadgeView(settings.program.badge)
-          SonyPillBadge(text: settings.focusMode.rawValue)
-          if settings.isFrontCamera {
-            SonyPillBadge(text: "FRONT")
-          }
-
-          Spacer(minLength: 4)
-
-          BadgeView(settings.effectiveRaw ? "RAW+HEIF" : "HEIF", isActive: settings.effectiveRaw)
-          Text("4:3")
-            .font(theme.labelFont)
-            .foregroundColor(theme.secondaryText)
-
-          Spacer(minLength: 4)
-
-          ShotsLeftView(telemetry: controller.telemetry)
-          SonyBatteryView()
-        }
-
-        // Bottom row: Histogram & Horizon Level gauge
-        HStack(spacing: 10) {
-          HistogramView(
-            telemetry: controller.telemetry,
-            mode: theme.telemetry == .minimal ? .luma : settings.overlays.histogramMode
-          )
-          .frame(width: 84, height: 22)
-          .contentShape(Rectangle())
-          .onTapGesture { controller.toggleHistogramExpanded() }
-          Spacer(minLength: 0)
-          if settings.overlays.levelEnabled {
-            LevelView(telemetry: controller.telemetry)
-              .frame(width: 120, height: 22)
-          }
-        }
+      switch theme.telemetry {
+      case .dense: ProStatusHeader(controller: controller)
+      case .minimal: EditionReadoutStrip(controller: controller)
       }
-      .padding(.horizontal, 12)
-      .padding(.vertical, 4)
     }
   }
 }
 
-private struct SonyPillBadge: View {
+// MARK: - Pro theme
+
+private struct ProStatusHeader: View {
+  let controller: CameraController
+  @Environment(\.cameraTheme) var theme
+
+  var body: some View {
+    let settings = controller.settings
+    VStack(spacing: 6) {
+      HStack(spacing: 6) {
+        BadgeView(settings.program.badge)
+        StatusPill(text: settings.focusMode.rawValue)
+        if settings.isFrontCamera {
+          StatusPill(text: "FRONT")
+        }
+        Spacer(minLength: 6)
+        FormatBadge(controller: controller)
+        Text(FramingMode.native.label)
+          .font(theme.labelFont)
+          .tracking(theme.labelTracking)
+          .foregroundColor(theme.secondaryText)
+        Spacer(minLength: 6)
+        ShotsLeftView(telemetry: controller.telemetry)
+        BatteryView()
+      }
+      .frame(height: 20)
+
+      HStack(spacing: 10) {
+        HistogramView(telemetry: controller.telemetry, mode: settings.overlays.histogramMode)
+          .frame(width: 84, height: 22)
+          .contentShape(Rectangle())
+          .onTapGesture { controller.toggleHistogramExpanded() }
+          .accessibilityHint("Double-tap to enlarge the histogram.")
+        Spacer(minLength: 0)
+        if settings.overlays.levelEnabled {
+          LevelView(telemetry: controller.telemetry)
+            .frame(width: 120, height: 22)
+        }
+      }
+    }
+    .padding(.horizontal, 12)
+    .padding(.vertical, 4)
+  }
+}
+
+/// The capture format; a tap cycles HEIF → RAW → RAW+HEIF.
+private struct FormatBadge: View {
+  let controller: CameraController
+
+  var body: some View {
+    let settings = controller.settings
+    let format = settings.effectiveFormat
+    Button {
+      controller.cycleCaptureFormat()
+    } label: {
+      BadgeView(format.label, isActive: format.includesRaw)
+    }
+    .buttonStyle(.plain)
+    .disabled(!settings.rawSupported)
+    .accessibilityLabel("Format \(format.label)")
+    .accessibilityHint(settings.rawSupported ? "Double-tap to change the format." : "")
+  }
+}
+
+private struct StatusPill: View {
   let text: String
   @Environment(\.cameraTheme) var theme
 
@@ -70,43 +100,156 @@ private struct SonyPillBadge: View {
     Text(text)
       .font(theme.labelFont.weight(.semibold))
       .tracking(theme.labelTracking)
-      .foregroundColor(theme.secondaryText)
+      .foregroundColor(theme.text)
       .padding(.horizontal, 5)
       .padding(.vertical, 2)
       .background(theme.surfaceRaised, in: RoundedRectangle(cornerRadius: theme.badgeCornerRadius))
   }
 }
 
-private struct SonyBatteryView: View {
+// MARK: - Edition
+
+private struct EditionReadoutStrip: View {
+  let controller: CameraController
   @Environment(\.cameraTheme) var theme
-  @State private var batteryPercent: Int = 100
 
   var body: some View {
+    let settings = controller.settings
+    let telemetry = controller.telemetry
+    VStack(spacing: 4) {
+      HStack(spacing: 8) {
+        Button {
+          controller.cycleFraming()
+        } label: {
+          BadgeView(settings.framing.label)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Framing \(settings.framing.label)")
+        .accessibilityHint("Double-tap to change the framing.")
+        ThemeLabel(settings.effectiveFormat.label)
+        Spacer(minLength: 6)
+        HistogramView(telemetry: telemetry, mode: .luma, showsFrame: false)
+          .frame(width: 64, height: 16)
+          .contentShape(Rectangle())
+          .onTapGesture { controller.toggleHistogramExpanded() }
+        Spacer(minLength: 6)
+        if settings.overlays.levelEnabled {
+          HairlineLevel(telemetry: telemetry)
+            .frame(width: 56, height: 16)
+        }
+        ThemeLabel(Readouts.shotsLeft(telemetry))
+          .monospacedDigit()
+          .accessibilityLabel("Shots left \(Readouts.shotsLeft(telemetry))")
+      }
+      .frame(height: 20)
+
+      HStack(alignment: .lastTextBaseline, spacing: 0) {
+        LargeReadout(label: "SS", readout: Readouts.shutter(settings, telemetry))
+        LargeReadout(label: "F", readout: Readouts.aperture(settings, telemetry))
+        LargeReadout(label: "ISO", readout: Readouts.iso(settings, telemetry))
+        LargeReadout(
+          label: Readouts.evLabel(settings),
+          readout: Readouts.ev(settings, telemetry),
+          warning: settings.evIsMeteredManual && abs(telemetry.meterOffset) > 3
+        )
+      }
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 4)
+  }
+}
+
+/// One large, light exposure value with its name above. Camera-chosen values are dimmed.
+private struct LargeReadout: View {
+  let label: String
+  let readout: Readout
+  var warning = false
+  @Environment(\.cameraTheme) var theme
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      ThemeLabel(readout.isAuto ? "\(label) · auto" : label)
+      Text(readout.text)
+        .font(theme.readoutFont)
+        .monospacedDigit()
+        .lineLimit(1)
+        .minimumScaleFactor(0.55)
+        .foregroundColor(warning ? theme.warning : (readout.isAuto ? theme.secondaryText : theme.text))
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(label)
+    .accessibilityValue(readout.isAuto ? "\(readout.text), auto" : readout.text)
+  }
+}
+
+/// The Edition's level: one hairline that rotates with the roll and turns solid when level.
+private struct HairlineLevel: View {
+  let telemetry: LiveTelemetry
+  @Environment(\.cameraTheme) var theme
+
+  var body: some View {
+    let roll = RotationMath.deviationFromNearestRightAngle(telemetry.rollDegrees)
+    let level = telemetry.rollIsLevel
+    Canvas { context, size in
+      let mid = CGPoint(x: size.width / 2, y: size.height / 2)
+      let angle = -ExposureMath.clamp(roll, -20, 20) * .pi / 180
+      var line = Path()
+      line.move(to: CGPoint(x: -size.width / 2, y: 0))
+      line.addLine(to: CGPoint(x: size.width / 2, y: 0))
+      let transform = CGAffineTransform(translationX: mid.x, y: mid.y).rotated(by: angle)
+      context.stroke(line.applying(transform), with: .color(level ? theme.text : theme.secondaryText), lineWidth: level ? 1.5 : 0.75)
+    }
+    .accessibilityElement()
+    .accessibilityLabel("Level")
+    .accessibilityValue(level ? "Level" : String(format: "%.1f degrees", roll))
+  }
+}
+
+// MARK: - Shared pieces
+
+/// Battery level and charging state, updated from UIDevice notifications.
+private struct BatteryView: View {
+  @Environment(\.cameraTheme) var theme
+  @State private var level: Float = -1
+  @State private var charging = false
+
+  var body: some View {
+    let percent = level < 0 ? nil : max(1, Int((level * 100).rounded()))
     HStack(spacing: 3) {
-      Image(systemName: batteryIconName)
-        .font(.system(size: 11, weight: .semibold))
-        .foregroundColor(batteryColor)
-      Text("\(batteryPercent)%")
+      Image(systemName: iconName(percent))
+        .font(.system(size: 12, weight: .regular))
+        .foregroundColor(percent.map { $0 <= 20 && !charging } == true ? theme.warning : theme.secondaryText)
+      Text(percent.map { "\($0)%" } ?? "—")
         .font(theme.telemetryFont)
         .monospacedDigit()
         .foregroundColor(theme.secondaryText)
     }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("Battery")
+    .accessibilityValue(percent.map { "\($0) percent\(charging ? ", charging" : "")" } ?? "Unknown")
     .onAppear {
       UIDevice.current.isBatteryMonitoringEnabled = true
-      let level = UIDevice.current.batteryLevel
-      batteryPercent = level < 0 ? 100 : max(1, Int(level * 100))
+      refresh()
     }
+    .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in refresh() }
+    .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryStateDidChangeNotification)) { _ in refresh() }
   }
 
-  private var batteryIconName: String {
-    if batteryPercent > 75 { return "battery.100" }
-    if batteryPercent > 50 { return "battery.75" }
-    if batteryPercent > 25 { return "battery.50" }
-    return "battery.25"
+  private func refresh() {
+    level = UIDevice.current.batteryLevel
+    let state = UIDevice.current.batteryState
+    charging = state == .charging || state == .full
   }
 
-  private var batteryColor: Color {
-    batteryPercent <= 20 ? theme.warning : theme.secondaryText
+  private func iconName(_ percent: Int?) -> String {
+    if charging { return "battery.100.bolt" }
+    guard let percent else { return "battery.100" }
+    if percent > 85 { return "battery.100" }
+    if percent > 60 { return "battery.75" }
+    if percent > 35 { return "battery.50" }
+    if percent > 10 { return "battery.25" }
+    return "battery.0"
   }
 }
 
@@ -115,20 +258,23 @@ private struct ShotsLeftView: View {
   @Environment(\.cameraTheme) var theme
 
   var body: some View {
-    HStack(spacing: 2) {
-      Image(systemName: "sdcard.fill")
-        .font(.system(size: 9))
+    let shots = Readouts.shotsLeft(telemetry)
+    HStack(spacing: 3) {
+      Image(systemName: "sdcard")
+        .font(.system(size: 10))
         .foregroundColor(theme.secondaryText)
-      Text("[\(Readouts.shotsLeft(telemetry))]")
+      Text(shots)
         .font(theme.telemetryFont)
         .monospacedDigit()
-        .foregroundColor(theme.secondaryText)
+        .foregroundColor(theme.text)
     }
-    .accessibilityLabel("Shots left \(Readouts.shotsLeft(telemetry))")
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel("Shots left")
+    .accessibilityValue(shots)
   }
 }
 
-/// Sony-style horizon bar (roll) with a pitch bubble. Both turn to the emphasis colour within
+/// Alpha-style horizon bar (roll) with a pitch bubble. Both turn to the confirmation colour within
 /// ±0.5° (with hysteresis, see `LevelIndicator`).
 struct LevelView: View {
   let telemetry: LiveTelemetry
@@ -137,8 +283,8 @@ struct LevelView: View {
   var body: some View {
     let roll = RotationMath.deviationFromNearestRightAngle(telemetry.rollDegrees)
     let pitch = telemetry.pitchDegrees
-    let rollColor = telemetry.rollIsLevel ? theme.emphasis : theme.text
-    let pitchColor = telemetry.pitchIsLevel ? theme.emphasis : theme.secondaryText
+    let rollColor = telemetry.rollIsLevel ? theme.confirmation : theme.text
+    let pitchColor = telemetry.pitchIsLevel ? theme.confirmation : theme.secondaryText
     Canvas { context, size in
       let mid = CGPoint(x: size.width / 2, y: size.height / 2)
       // Fixed reference ticks.

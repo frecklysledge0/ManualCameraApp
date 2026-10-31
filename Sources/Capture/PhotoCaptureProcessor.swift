@@ -50,9 +50,14 @@ final class PhotoCaptureProcessor {
     var onWillCapture: (() -> Void)?
     /// Called exactly once with the final outcome.
     var onFinish: ((PhotoCaptureProcessor, CaptureOutcome) -> Void)?
+    /// Called on the photo callback queue right after the DNG was written (thumbnail for RAW-only shots).
+    var onRawFileWritten: ((URL) -> Void)?
     /// Optional development step that replaces the processed image (used by the Edition in Slice 3).
     /// It runs on the photo output's callback queue; errors fall back to the unmodified item.
     var develop: ((CaptureItem) throws -> CaptureItem)?
+    /// Where `develop` runs. Developing a 48 MP shot takes about a second, so the Edition moves it off
+    /// the photo output's callback queue. nil runs it inline (tests).
+    var developQueue: DispatchQueue?
 
     private let saver: PhotoLibrarySaving
     private let store: CaptureFileStoring
@@ -102,7 +107,9 @@ final class PhotoCaptureProcessor {
         if photo.isRawPhoto {
             do {
                 // Write the DNG straight to disk and let the large Data go out of scope.
-                item.rawFileURL = try store.writeRaw(data, for: id)
+                let url = try store.writeRaw(data, for: id)
+                item.rawFileURL = url
+                onRawFileWritten?(url)
             } catch {
                 recordError(CaptureError.rawWriteFailed(error))
             }
@@ -120,14 +127,20 @@ final class PhotoCaptureProcessor {
             return
         }
 
-        var toSave = item
-        if let develop {
-            do {
-                toSave = try develop(item)
-            } catch {
-                toSave = item
+        if let develop, let developQueue {
+            let captured = item
+            developQueue.async { [weak self] in
+                let developed = (try? develop(captured)) ?? captured
+                self?.save(developed)
             }
+        } else if let develop {
+            save((try? develop(item)) ?? item)
+        } else {
+            save(item)
         }
+    }
+
+    private func save(_ toSave: CaptureItem) {
         item = toSave
         let bytes = Self.size(of: toSave)
 
@@ -183,6 +196,7 @@ final class PhotoCaptureProcessor {
         let callback = onFinish
         onFinish = nil
         onWillCapture = nil
+        onRawFileWritten = nil
         develop = nil
         callback?(self, outcome)
     }

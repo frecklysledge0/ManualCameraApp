@@ -189,3 +189,24 @@ final class CaptureFileStore: CaptureFileStoring {
         return formatter.string(from: date)
     }
 }
+
+/// What one shutter press saves (Fn › Format).
+enum CaptureFormat: String, Codable, CaseIterable, Sendable {
+    /// Processed HEIF only (fastest).
+    case heif
+    /// Apple ProRAW (or Bayer RAW) DNG only — shows as a RAW / ProRAW photo in Photos.
+    case raw
+    /// HEIF shown in Photos with the DNG attached as its RAW original (RAW+HEIF pair).
+    case rawPlusHEIF
+
+    var includesRaw: Bool { self != .heif }
+    var includesProcessed: Bool { self != .raw }
+
+    var label: String {
+        switch self {
+        case .heif: return "HEIF"
+        case .raw: return "RAW"
+        case .rawPlusHEIF: return "RAW+HEIF"
+        }
+    }
+}

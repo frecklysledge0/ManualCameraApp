@@ -8,7 +8,9 @@ struct CameraView: View {
     @Environment(\.scenePhase) var scenePhase
 
     var body: some View {
-        let theme = CameraTheme.alpha
+        // The theme follows the settings; `setEdition` changes it inside a 0.35 s animation, so
+        // every colour and metric cross-dissolves.
+        let theme = CameraTheme.theme(for: controller.settings.theme)
         ZStack {
             theme.background.ignoresSafeArea()
 
@@ -22,6 +24,9 @@ struct CameraView: View {
             }
         }
         .environment(\.cameraTheme, theme)
+        // The strip shows battery and shots left like a camera body; the system bar would repeat them.
+        .statusBarHidden(true)
+        .persistentSystemOverlays(.hidden)
         .onAppear {
             controller.start()
         }
@@ -41,31 +46,34 @@ private struct CameraLayout: View {
     @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     /// Height of the shutter row.
-    private let shutterRowHeight: CGFloat = 92
+    private let shutterRowHeight: CGFloat = 88
 
     var body: some View {
         GeometryReader { geometry in
-            let deck = theme.trayHeight + theme.tileHeight + shutterRowHeight + 16
-            let available = geometry.size.height - theme.stripHeight - deck
-            // The viewfinder is 3:4 and never shrinks the controls: on short screens it gets
-            // narrower instead of being covered.
-            let viewfinderWidth = min(geometry.size.width, max(available, 0) * 3 / 4)
+            // Fixed controls: strip, Fn bar and shutter row. The 3:4 viewfinder takes the rest at
+            // full width when it fits, and gets narrower on short screens; the controls never shrink.
+            let fixed = theme.stripHeight + theme.tileHeight + shutterRowHeight + 12
+            let region = max(geometry.size.height - fixed, 0)
+            let viewfinderWidth = min(geometry.size.width, region * 3 / 4)
             let viewfinderHeight = viewfinderWidth * 4 / 3
 
             VStack(spacing: 0) {
                 TelemetryStrip(controller: controller)
                     .frame(height: theme.stripHeight)
 
-                ViewfinderLayer(controller: controller)
-                    .frame(width: viewfinderWidth, height: viewfinderHeight)
-                    .clipped()
-                    .frame(maxWidth: .infinity)
+                // The dial tray and banners rise from the bottom of this region. Where the screen
+                // has room they sit below the image; on shorter phones they cover its lower edge
+                // only while open, like a camera body's on-screen menu.
+                ZStack(alignment: .bottom) {
+                    VStack(spacing: 0) {
+                        ViewfinderLayer(controller: controller)
+                            .frame(width: viewfinderWidth, height: viewfinderHeight)
+                            .clipped()
+                            .frame(maxWidth: .infinity)
+                        Spacer(minLength: 0)
+                    }
 
-                Spacer(minLength: 0)
-
-                VStack(spacing: 4) {
-                    ZStack(alignment: .bottom) {
-                        Color.clear.frame(height: theme.trayHeight)
+                    Group {
                         if let tile = controller.settings.activeTile {
                             DialTray(controller: controller, tile: tile)
                                 .id(tile)
@@ -74,12 +82,17 @@ private struct CameraLayout: View {
                             BannerStack(status: controller.status) { banner in
                                 controller.perform(banner.action, for: banner.kind)
                             }
-                            .frame(maxHeight: theme.trayHeight, alignment: .bottom)
+                            .padding(.bottom, 8)
                         }
                     }
-                    .clipped()
+                    .frame(maxHeight: theme.trayHeight, alignment: .bottom)
+                }
+                .frame(height: region)
+                .clipped()
 
+                VStack(spacing: 4) {
                     FnBar(controller: controller)
+                        .padding(.top, 4)
 
                     ShutterRow(controller: controller)
                         .frame(height: shutterRowHeight)
@@ -104,9 +117,14 @@ private struct ViewfinderLayer: View {
     let controller: CameraController
 
     var body: some View {
-        let overlays = controller.settings.overlays
+        let settings = controller.settings
+        let overlays = settings.overlays
         ZStack {
             CameraPreviewView(controller: controller)
+
+            if settings.isEdition {
+                FramingMatteView(framing: settings.framing)
+            }
 
             if overlays.grid != .off {
                 GridOverlayView(mode: overlays.grid)
@@ -115,16 +133,18 @@ private struct ViewfinderLayer: View {
                 HorizonLineView(telemetry: controller.telemetry)
             }
 
-            FocusFrameView(status: controller.status)
+            FocusFrameView(status: controller.status, focusMode: settings.focusMode)
 
             InterruptionOverlay(status: controller.status)
 
             CaptureFlashView(status: controller.status)
 
             #if DEBUG
-            DebugHUD(telemetry: controller.telemetry)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .padding(4)
+            if settings.showPerformanceHUD {
+                DebugHUD(telemetry: controller.telemetry)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(4)
+            }
             #endif
         }
     }

@@ -3,9 +3,8 @@ import ImageIO
 import Photos
 import UIKit
 
-/// Saves a `CaptureItem` as **one** Photos asset: the processed image is the `.photo` resource and
-/// the DNG is the `.alternatePhoto`, moved (not copied) into the library (F4). When Photos add access
-/// is denied the files go to the app's Documents folder instead (§11).
+/// Saves a `CaptureItem` as **one** Photos asset (F4). The DNG is moved, not copied, into the
+/// library. When Photos add access is denied the files go to the app's Documents folder (§11).
 final class PhotoLibrarySaver: PhotoLibrarySaving {
 
   private let store: CaptureFileStoring
@@ -36,25 +35,27 @@ final class PhotoLibrarySaver: PhotoLibrarySaving {
     PHPhotoLibrary.shared().performChanges(
       {
         let request = PHAssetCreationRequest.forAsset()
-        if let rawURL {
-          // In PhotoKit, for a RAW+processed asset, .photo represents the RAW image
-          // and .alternatePhoto represents the companion JPEG/HEIF preview image.
-          // This ensures Photos app displays the RAW badge and treats it as a RAW photo.
-          let rawOptions = PHAssetResourceCreationOptions()
-          rawOptions.shouldMoveFile = true
-          rawOptions.uniformTypeIdentifier = "com.adobe.raw-image"
-          request.addResource(with: .photo, fileURL: rawURL, options: rawOptions)
-
-          if let processedData {
-            let processedOptions = PHAssetResourceCreationOptions()
-            processedOptions.uniformTypeIdentifier = processedType
-            request.addResource(
-              with: .alternatePhoto, data: processedData, options: processedOptions)
-          }
-        } else if let processedData {
+        // PhotoKit's rules: the `.photo` resource is what Photos displays. A RAW-only shot
+        // therefore uses the DNG as `.photo` (it then shows as a RAW / ProRAW photo, exactly like
+        // Apple's Camera). A RAW+HEIF pair uses the HEIF as `.photo` and the DNG as
+        // `.alternatePhoto` — the documented RAW+JPEG/HEIF pairing.
+        let rawOptions = PHAssetResourceCreationOptions()
+        rawOptions.shouldMoveFile = true
+        rawOptions.uniformTypeIdentifier = "com.adobe.raw-image"
+        switch (processedData, rawURL) {
+        case (.some(let data), .some(let url)):
           let options = PHAssetResourceCreationOptions()
           options.uniformTypeIdentifier = processedType
-          request.addResource(with: .photo, data: processedData, options: options)
+          request.addResource(with: .photo, data: data, options: options)
+          request.addResource(with: .alternatePhoto, fileURL: url, options: rawOptions)
+        case (.none, .some(let url)):
+          request.addResource(with: .photo, fileURL: url, options: rawOptions)
+        case (.some(let data), .none):
+          let options = PHAssetResourceCreationOptions()
+          options.uniformTypeIdentifier = processedType
+          request.addResource(with: .photo, data: data, options: options)
+        case (.none, .none):
+          break
         }
       },
       completionHandler: { success, error in
@@ -76,6 +77,20 @@ enum ThumbnailMaker {
       kCGImageSourceCreateThumbnailWithTransform: true,
       kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
       kCGImageSourceShouldCacheImmediately: true,
+    ]
+    guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+      return nil
+    }
+    return UIImage(cgImage: image)
+  }
+
+  /// Thumbnail from a DNG on disk. Uses the embedded preview, so the RAW is never decoded.
+  static func thumbnail(fromFileURL url: URL, maxPixelSize: Int = 180) -> UIImage? {
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+    let options: [CFString: Any] = [
+      kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
     ]
     guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
       return nil

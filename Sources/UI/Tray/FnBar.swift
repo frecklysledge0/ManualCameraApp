@@ -30,26 +30,30 @@ struct FnTileView: View {
         let isDisabled = tile == .aperture && !settings.capability.hasVariableAperture
         VStack(spacing: 2) {
             Text(tile == .ev ? Readouts.evLabel(settings) : tile.label)
-                .font(theme.labelFont)
+                .font(theme.tilesShowValues ? theme.labelFont : theme.labelFont.weight(.medium))
                 .tracking(theme.labelTracking)
-                .foregroundColor(isActive && theme.emphasisByInversion ? theme.background : theme.secondaryText)
-            Text(readout.text)
-                .font(theme.telemetryFont)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .foregroundColor(valueColor(readout: readout, isActive: isActive))
-            if readout.isAuto && tile != .mode {
+                .foregroundColor(labelColor(isActive: isActive))
+            if theme.tilesShowValues || tile == .mode {
+                // The Edition shows exposure values large in the strip, so its tiles carry only
+                // their names (each value appears once on screen). The mode letter stays.
+                Text(readout.text)
+                    .font(theme.telemetryFont)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .foregroundColor(valueColor(readout: readout, isActive: isActive))
+            }
+            if theme.tilesShowValues && readout.isAuto && tile != .mode {
                 Text("AUTO")
                     .font(.system(size: 8, weight: .bold))
-                    .foregroundColor(isActive && theme.emphasisByInversion ? theme.background : theme.accent)
+                    .foregroundColor(isActive && theme.emphasisByInversion ? theme.background : theme.selection)
             }
         }
         .frame(maxWidth: .infinity, minHeight: theme.tileHeight)
         .background(tileBackground(isActive: isActive), in: RoundedRectangle(cornerRadius: theme.tileCornerRadius))
         .overlay(
             RoundedRectangle(cornerRadius: theme.tileCornerRadius)
-                .stroke(isActive && !theme.emphasisByInversion ? theme.accent : theme.hairline, lineWidth: 1)
+                .stroke(isActive && !theme.emphasisByInversion ? theme.selection : theme.hairline, lineWidth: 1)
         )
         .opacity(isDisabled ? 0.55 : 1)
         .contentShape(Rectangle())
@@ -70,6 +74,12 @@ struct FnTileView: View {
         .accessibilityAdjustableAction { direction in
             TileStepper.step(tile, controller: controller, by: direction == .increment ? 1 : -1)
         }
+    }
+
+    private func labelColor(isActive: Bool) -> Color {
+        if isActive && theme.emphasisByInversion { return theme.background }
+        if !theme.tilesShowValues { return isActive ? theme.text : theme.text.opacity(0.8) }
+        return isActive ? theme.selection : theme.secondaryText
     }
 
     private func valueColor(readout: Readout, isActive: Bool) -> Color {

@@ -21,9 +21,9 @@ struct MFWheel: View {
     }
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 4) {
             WheelRidges(phase: phase, color: theme.text)
-                .frame(height: 36)
+                .frame(height: 28)
                 .background(theme.surfaceRaised, in: RoundedRectangle(cornerRadius: theme.tileCornerRadius))
                 .overlay(RoundedRectangle(cornerRadius: theme.tileCornerRadius).stroke(theme.hairline, lineWidth: 1))
                 .contentShape(Rectangle())
@@ -47,7 +47,7 @@ struct MFWheel: View {
                 )
 
             FocusDistanceBar(position: position)
-                .frame(height: 14)
+                .frame(height: 12)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Manual focus")
@@ -76,7 +76,7 @@ private struct WheelRidges: View {
             while x < size.width {
                 // Ridges fade towards the edges, like a cylinder.
                 let t = abs(x / size.width - 0.5) * 2
-                let rect = CGRect(x: x, y: 6, width: 1, height: size.height - 12)
+                let rect = CGRect(x: x, y: 5, width: 1, height: max(size.height - 10, 1))
                 context.fill(Path(rect), with: .color(color.opacity(0.55 * (1 - t * t))))
                 x += spacing
             }
@@ -97,7 +97,7 @@ struct FocusDistanceBar: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(theme.hairline).frame(height: 2)
                     Capsule()
-                        .fill(theme.emphasis)
+                        .fill(theme.selection)
                         .frame(width: 3, height: 10)
                         .offset(x: CGFloat(ExposureMath.clamp(position, 0, 1)) * max(geometry.size.width - 3, 0))
                 }

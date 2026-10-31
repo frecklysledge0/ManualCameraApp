@@ -53,15 +53,15 @@ struct SegmentedChoice<Option: Hashable>: View {
                 } label: {
                     Text(label(option))
                         .font(theme.telemetryLargeFont.weight(.semibold))
-                        .foregroundColor(isSelected ? (theme.emphasisByInversion ? theme.background : theme.accent) : theme.text)
-                        .frame(maxWidth: .infinity, minHeight: 34)
+                        .foregroundColor(isSelected ? (theme.emphasisByInversion ? theme.background : theme.selection) : theme.text)
+                        .frame(maxWidth: .infinity, minHeight: 28, maxHeight: 40)
                         .background(
                             isSelected ? (theme.emphasisByInversion ? theme.text : theme.surfaceRaised) : Color.clear,
                             in: RoundedRectangle(cornerRadius: theme.tileCornerRadius)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: theme.tileCornerRadius)
-                                .stroke(isSelected && !theme.emphasisByInversion ? theme.accent : theme.hairline, lineWidth: 1)
+                                .stroke(isSelected && !theme.emphasisByInversion ? theme.selection : theme.hairline, lineWidth: 1)
                         )
                 }
                 .buttonStyle(.plain)
@@ -224,7 +224,7 @@ private struct MeteredManualScale: View {
                     let clamped = CGFloat(ExposureMath.clamp(offset, -3, 3))
                     let markerX = width / 2 + clamped / 3 * (width / 2 - 8)
                     let marker = Path(CGRect(x: markerX - 2, y: 0, width: 4, height: 22))
-                    context.fill(marker, with: .color(abs(offset) > 3 ? theme.warning : theme.emphasis))
+                    context.fill(marker, with: .color(abs(offset) > 3 ? theme.warning : theme.selection))
                 }
             }
             .frame(height: 24)
@@ -307,11 +307,12 @@ private struct FocusTray: View {
 
     var body: some View {
         let settings = controller.settings
+        // Tray content is 80 pt tall: 30 (mode) + 4 + 44 (wheel 28 + 4 + bar 12).
         VStack(spacing: 4) {
             SegmentedChoice(options: FocusMode.allCases, selected: settings.focusMode, label: { $0.rawValue }) { mode in
                 controller.setFocusMode(mode)
             }
-            .frame(height: 26)
+            .frame(height: 30)
             MFWheel(
                 position: settings.focusMode == .manual ? settings.lensPosition : controller.telemetry.liveLensPosition,
                 onBegan: { controller.mfWheelBegan() },
