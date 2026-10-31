@@ -13,10 +13,12 @@ final class MetalOverlayView: UIView {
         layer as! CAMetalLayer // swiftlint:disable:this force_cast
     }
 
-    /// Longest drawable edge in pixels; the overlay does not need more than the screen.
-    private let maxDrawableDimension: CGFloat = 2200
+    /// Longest drawable edge in pixels. The peaking overlay uses about half the screen resolution,
+    /// which gives the edges a light, even dilation when the layer is scaled up.
+    private let maxDrawableDimension: CGFloat
 
-    init(device: MTLDevice?) {
+    init(device: MTLDevice?, maxDrawableDimension: CGFloat = 2200) {
+        self.maxDrawableDimension = maxDrawableDimension
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         isOpaque = false

@@ -27,7 +27,9 @@ TEAM = "C3ZVJR656Q"
 DEPLOYMENT_TARGET = "17.0"
 # Swift language mode. Xcode only accepts 4, 4.2, 5 or 6 here; "5.9" is a compiler version, not a mode.
 SWIFT_VERSION = "5.0"
-APP_COMPILATION_CONDITIONS: list[str] = []
+# IOS27_APERTURE_API compiles Capture/ApertureSupport.swift against the iOS 27 SDK (variable aperture).
+# Remove it to build with an older Xcode; the app then treats every lens as fixed-aperture.
+APP_COMPILATION_CONDITIONS: list[str] = ["IOS27_APERTURE_API"]
 
 FILE_TYPES = {
     ".swift": "sourcecode.swift",

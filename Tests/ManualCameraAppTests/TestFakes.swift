@@ -37,6 +37,7 @@ final class FakeCameraDevice: CameraDevice {
     var currentDuration: Double = 1.0 / 100
     var currentBias: Float = 0
     var currentLensPosition: Float = 0.42
+    var currentAperture: Float = 1.48
     var exposureTargetOffset: Float = 0
     var currentWhiteBalance: (temperature: Float, tint: Float) = (5200, 0)
 
@@ -44,6 +45,7 @@ final class FakeCameraDevice: CameraDevice {
     private(set) var lockCalls = 0
     private(set) var unlockCalls = 0
     private(set) var customExposures: [(duration: Double, iso: Float)] = []
+    private(set) var priorityExposures: [(aperture: Float?, duration: Double?, iso: Float?)] = []
     private(set) var autoExposureBiases: [Float] = []
     private(set) var biasChanges: [Float] = []
     private(set) var exposurePoints: [CGPoint] = []
@@ -78,6 +80,10 @@ final class FakeCameraDevice: CameraDevice {
 
     func applyCustomExposure(duration: Double, iso: Float) {
         customExposures.append((duration, iso))
+    }
+
+    func applyPriorityExposure(aperture: Float?, duration: Double?, iso: Float?) {
+        priorityExposures.append((aperture, duration, iso))
     }
 
     func applyExposurePoint(_ point: CGPoint) {

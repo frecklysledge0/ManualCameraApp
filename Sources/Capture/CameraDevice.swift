@@ -19,6 +19,8 @@ struct DeviceLimits: Equatable, Sendable {
     var supportsExposurePointOfInterest = true
     /// Fixed or current aperture (ƒ-number) of the lens.
     var aperture: Float = 1.8
+    /// Variable aperture and iOS 27 priority-mode support.
+    var exposure: ExposureCapability = .fixed
 
     static let `default` = DeviceLimits()
 
@@ -33,6 +35,17 @@ struct DeviceLimits: Equatable, Sendable {
     func clampBias(_ bias: Float) -> Float {
         ExposureMath.clamp(bias, min(minBias, maxBias), max(minBias, maxBias))
     }
+
+    func clampAperture(_ aperture: Float) -> Float {
+        let lower = min(exposure.minAperture, exposure.maxAperture)
+        let upper = max(exposure.minAperture, exposure.maxAperture)
+        return ExposureMath.clamp(aperture, lower, upper)
+    }
+
+    /// Whether the device accepts `setExposureModeCustom(lensAperture:duration:iso:)` at all.
+    var supportsPriorityExposure: Bool {
+        exposure.supportsAperturePriority || exposure.supportsShutterPriority || exposure.supportsManualAperture
+    }
 }
 
 // MARK: - Commands
@@ -44,6 +57,9 @@ enum ExposureCommand: Equatable, Sendable {
     case custom(iso: Float, duration: Double)
     /// Changes only the bias; ignored while exposure is custom (F7).
     case bias(Float)
+    /// iOS 27 priority / aperture exposure. A nil parameter is automatic (nil aperture keeps the
+    /// current iris position). The bias applies to whichever parameters are automatic.
+    case priority(aperture: Float?, duration: Double?, iso: Float?, bias: Float)
 }
 
 enum WhiteBalanceCommand: Equatable, Sendable {
@@ -73,6 +89,24 @@ enum DeviceCommand: Equatable, Sendable {
 enum AppliedExposure: Equatable, Sendable {
     case auto(bias: Float)
     case custom(iso: Float, duration: Double)
+    case priority(aperture: Float?, duration: Double?, iso: Float?, bias: Float)
+
+    /// Manual-style exposure: still capture must use `.speed` (F6).
+    var isLocked: Bool {
+        switch self {
+        case .auto: return false
+        case .custom, .priority: return true
+        }
+    }
+
+    /// True when nothing is automatic, so bias and metering points have no effect.
+    var isFullyManual: Bool {
+        switch self {
+        case .auto: return false
+        case .custom: return true
+        case .priority(_, let duration, let iso, _): return duration != nil && iso != nil
+        }
+    }
 }
 
 struct AppliedWhiteBalance: Equatable, Sendable {
@@ -101,6 +135,7 @@ protocol CameraDevice: AnyObject {
     var currentDuration: Double { get }
     var currentBias: Float { get }
     var currentLensPosition: Float { get }
+    var currentAperture: Float { get }
     var exposureTargetOffset: Float { get }
     var currentWhiteBalance: (temperature: Float, tint: Float) { get }
 
@@ -110,6 +145,8 @@ protocol CameraDevice: AnyObject {
     func applyContinuousAutoExposure(bias: Float)
     func applyExposureBias(_ bias: Float)
     func applyCustomExposure(duration: Double, iso: Float)
+    /// iOS 27 `setExposureModeCustom(lensAperture:duration:iso:)`; nil values are automatic.
+    func applyPriorityExposure(aperture: Float?, duration: Double?, iso: Float?)
     func applyExposurePoint(_ point: CGPoint)
     func applyAutoWhiteBalance()
     /// Locks white balance and returns the temperature and tint actually achieved after the gains
