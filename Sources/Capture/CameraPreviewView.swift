@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -21,6 +22,7 @@ final class PreviewView: UIView {
     var onTap: ((CGPoint, CGPoint) -> Void)?
     var onLoupeTap: (() -> Void)?
     var onGeometryChange: ((ViewfinderGeometry) -> Void)?
+    var onShutter: (() -> Void)?
     private(set) var geometry = ViewfinderGeometry.zero
 
     /// Loupe panel size relative to the video width.
@@ -56,6 +58,18 @@ final class PreviewView: UIView {
         addGestureRecognizer(tap)
         let loupeTap = UITapGestureRecognizer(target: self, action: #selector(handleLoupeTap))
         loupeView.addGestureRecognizer(loupeTap)
+
+        // Hardware Camera Control (iPhone 16 / 17 / 18 side button) support
+        if #available(iOS 17.2, *) {
+            let interaction = AVCaptureEventInteraction { [weak self] event in
+                if event.phase == .ended {
+                    DispatchQueue.main.async {
+                        self?.onShutter?()
+                    }
+                }
+            }
+            addInteraction(interaction)
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -148,6 +162,9 @@ struct CameraPreviewView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView(metalDevice: controller.metalDevice)
+        view.onShutter = { [weak controller] in
+            controller?.shutterPressed()
+        }
         controller.attachPreview(view)
         return view
     }
